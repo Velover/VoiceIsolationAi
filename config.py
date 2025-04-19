@@ -32,6 +32,12 @@ def get_window_params(window_size):
         n_fft = 8192
     else:
         n_fft = 16384
+    
+    # Ensure n_fft is at least as large as window_samples
+    # Find the next power of 2 that is >= window_samples if needed
+    if n_fft < window_samples:
+        n_fft = 2 ** (window_samples - 1).bit_length()  # Next power of 2
+        print(f"Adjusted FFT size to {n_fft} to accommodate window size of {window_samples}")
         
     return {
         'window_size_ms': window_size_ms,

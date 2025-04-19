@@ -43,23 +43,53 @@ def train_model(window_size, use_pregenerated=False, num_examples=1000):
     
     # Create or use pre-generated dataset
     if use_pregenerated:
-        if not os.path.exists(dataset_dir) or not os.listdir(dataset_dir):
-            print(f"Pre-generating dataset with {num_examples} examples...")
-            generate_dataset(
-                VOICE_FOR_TRAINING, 
-                NOISE_FOR_TRAINING, 
-                dataset_dir,
-                num_examples=num_examples,
-                window_size_ms=window_size_ms,
-                window_samples=window_samples,
-                hop_length=hop_length,
-                n_fft=n_fft
-            )
+        # First check if dataset exists
+        if not os.path.exists(dataset_dir):
+            print(f"Dataset directory {dataset_dir} does not exist. Creating it...")
+            os.makedirs(dataset_dir, exist_ok=True)
         
-        # Use pre-generated dataset
-        dataset = PreGeneratedVoiceSeparationDataset(dataset_dir)
-    else:
-        # Use on-the-fly dataset
+        # Then check if it contains any data
+        dataset_files = [f for f in os.listdir(dataset_dir) if f.endswith('.pkl')]
+        if not dataset_files or len(dataset_files) < 10:  # Require at least 10 examples
+            print(f"No pre-generated dataset found or dataset too small ({len(dataset_files)} files).")
+            print(f"Pre-generating dataset with {num_examples} examples...")
+            
+            try:
+                # Clear directory first to avoid mixing different dataset versions
+                for file in dataset_files:
+                    os.remove(os.path.join(dataset_dir, file))
+                
+                generate_dataset(
+                    VOICE_FOR_TRAINING, 
+                    NOISE_FOR_TRAINING, 
+                    dataset_dir,
+                    num_examples=num_examples,
+                    window_size_ms=window_size_ms,
+                    window_samples=window_samples,
+                    hop_length=hop_length,
+                    n_fft=n_fft
+                )
+                print("Dataset pre-generation completed.")
+            except Exception as e:
+                print(f"Error generating dataset: {e}")
+                print("Falling back to on-the-fly dataset.")
+                use_pregenerated = False
+        else:
+            print(f"Using existing pre-generated dataset with {len(dataset_files)-1} examples.") # -1 for metadata file
+        
+        # Use pre-generated dataset if it exists
+        if use_pregenerated:
+            try:
+                dataset = PreGeneratedVoiceSeparationDataset(dataset_dir)
+                print(f"Successfully loaded pre-generated dataset with {len(dataset)} examples.")
+            except Exception as e:
+                print(f"Error loading pre-generated dataset: {e}")
+                print("Falling back to on-the-fly dataset.")
+                use_pregenerated = False
+    
+    # Use on-the-fly dataset if needed
+    if not use_pregenerated:
+        print("Using on-the-fly dataset generation.")
         dataset = VoiceSeparationDataset(
             VOICE_FOR_TRAINING, NOISE_FOR_TRAINING, 
             window_size_ms=window_size_ms,
@@ -68,6 +98,7 @@ def train_model(window_size, use_pregenerated=False, num_examples=1000):
             n_fft=n_fft
         )
     
+    # Create dataloader
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     
     # Define loss function and optimizer
@@ -171,6 +202,9 @@ def main():
     
     # Only generate dataset without training
     if args.generate_only:
+        print("\n=== DATASET GENERATION MODE ===")
+        print(f"Will generate datasets with {args.num_examples} examples each.")
+        
         if args.all:
             # Generate datasets for all window sizes
             for window_size in WindowSize:
@@ -178,7 +212,54 @@ def main():
                 model_id = get_model_id(window_size)
                 dataset_dir = os.path.join(DATASETS_DIR, f"{model_id}_dataset")
                 
-                print(f"Generating dataset for {window_size.name} ({window_size.value}ms) window size...")
+                print(f"\nGenerating dataset for {window_size.name} ({window_size.value}ms) window size...")
+                try:
+                    # Create directory if it doesn't exist
+                    os.makedirs(dataset_dir, exist_ok=True)
+                    
+                    # Clear existing files if any
+                    existing_files = [f for f in os.listdir(dataset_dir) if f.endswith('.pkl')]
+                    if existing_files:
+                        print(f"Removing {len(existing_files)} existing files in {dataset_dir}")
+                        for file in existing_files:
+                            os.remove(os.path.join(dataset_dir, file))
+                    
+                    # Generate dataset
+                    generate_dataset(
+                        VOICE_FOR_TRAINING, 
+                        NOISE_FOR_TRAINING, 
+                        dataset_dir,
+                        num_examples=args.num_examples,
+                        window_size_ms=params['window_size_ms'],
+                        window_samples=params['window_samples'],
+                        hop_length=params['hop_length'],
+                        n_fft=params['n_fft']
+                    )
+                    print(f"Dataset generation completed for {window_size.name}.")
+                except Exception as e:
+                    print(f"Error generating dataset for {window_size.name}: {e}")
+                    import traceback
+                    print(traceback.format_exc())
+        else:
+            # Generate dataset for specific window size
+            window_size = WindowSize[args.window_size]
+            params = get_window_params(window_size)
+            model_id = get_model_id(window_size)
+            dataset_dir = os.path.join(DATASETS_DIR, f"{model_id}_dataset")
+            
+            print(f"\nGenerating dataset for {window_size.name} ({window_size.value}ms) window size...")
+            try:
+                # Create directory if it doesn't exist
+                os.makedirs(dataset_dir, exist_ok=True)
+                
+                # Clear existing files if any
+                existing_files = [f for f in os.listdir(dataset_dir) if f.endswith('.pkl')]
+                if existing_files:
+                    print(f"Removing {len(existing_files)} existing files in {dataset_dir}")
+                    for file in existing_files:
+                        os.remove(os.path.join(dataset_dir, file))
+                
+                # Generate dataset
                 generate_dataset(
                     VOICE_FOR_TRAINING, 
                     NOISE_FOR_TRAINING, 
@@ -189,24 +270,13 @@ def main():
                     hop_length=params['hop_length'],
                     n_fft=params['n_fft']
                 )
-        else:
-            # Generate dataset for specific window size
-            window_size = WindowSize[args.window_size]
-            params = get_window_params(window_size)
-            model_id = get_model_id(window_size)
-            dataset_dir = os.path.join(DATASETS_DIR, f"{model_id}_dataset")
-            
-            print(f"Generating dataset for {window_size.name} ({window_size.value}ms) window size...")
-            generate_dataset(
-                VOICE_FOR_TRAINING, 
-                NOISE_FOR_TRAINING, 
-                dataset_dir,
-                num_examples=args.num_examples,
-                window_size_ms=params['window_size_ms'],
-                window_samples=params['window_samples'],
-                hop_length=params['hop_length'],
-                n_fft=params['n_fft']
-            )
+                print(f"Dataset generation completed for {window_size.name}.")
+            except Exception as e:
+                print(f"Error generating dataset for {window_size.name}: {e}")
+                import traceback
+                print(traceback.format_exc())
+        
+        print("\nAll dataset generation completed.")
         return
     
     if args.all:
