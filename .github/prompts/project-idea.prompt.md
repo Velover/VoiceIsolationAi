@@ -15,9 +15,13 @@ The project aims to train ai on the specific person's voice and be able to isola
 ## Project requirements
 
 - pytorch and if needed numpy
-- it should have a configuration for the sliding window size (e.g. 30ms or 2 seconds)
+- it should have a configuration for the sliding window size (30ms, 500ms, 2s)
 - it should have a part for training the ai and a part for using ai
 - no need to create an implementation for the microphone integration, for now, only simple audio file input and audio file output
 - keep in mind, audio files provided in training data are of various length
-- keep in mind, audio files are separated (VOICE, NOISE) and have to be combined in various ways for training
-- keep in mind, audio formats are (mp3, webm, wav)
+- keep in mind, audio files are separated (VOICE, NOISE) and have to be combined in various ways for training (ONLY NOISE, ONLY VOICE, COMBINATION, NONE)
+- keep in mind, audio formats are (mp3, wav)
+- keep everything documented
+- create a quickstart
+- keep in mind, the sounds might be of various frequencies
+- the AI should be CNN
