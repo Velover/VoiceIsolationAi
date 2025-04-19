@@ -13,7 +13,22 @@ from dataset import VoiceSeparationDataset, PreGeneratedVoiceSeparationDataset, 
 from config import *
 from prepare_data import prepare_training_data
 
-def train_model(window_size, use_pregenerated=False, num_examples=1000):
+class ComboLoss(nn.Module):
+    """Combination of MSE and L1 losses for better training signal"""
+    def __init__(self, mse_weight=0.7, l1_weight=0.3):
+        super(ComboLoss, self).__init__()
+        self.mse_weight = mse_weight
+        self.l1_weight = l1_weight
+        self.mse = nn.MSELoss()
+        self.l1 = nn.L1Loss()
+        
+    def forward(self, pred, target):
+        mse_loss = self.mse(pred, target)
+        l1_loss = self.l1(pred, target)
+        return self.mse_weight * mse_loss + self.l1_weight * l1_loss
+
+def train_model(window_size, use_pregenerated=False, num_examples=1000, loss_type='combo', 
+               patience=10, max_epochs=None):
     # Get window parameters
     params = get_window_params(window_size)
     window_size_ms = params['window_size_ms']
@@ -23,6 +38,11 @@ def train_model(window_size, use_pregenerated=False, num_examples=1000):
     
     print(f"Training model with window size: {window_size_ms}ms")
     print(f"Window samples: {window_samples}, Hop length: {hop_length}, FFT size: {n_fft}")
+    print(f"Using loss type: {loss_type}")
+    
+    # Set max epochs
+    if max_epochs is None:
+        max_epochs = NUM_EPOCHS
     
     # Create model
     model = UNet().to(DEVICE)
@@ -101,16 +121,37 @@ def train_model(window_size, use_pregenerated=False, num_examples=1000):
     # Create dataloader
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     
-    # Define loss function and optimizer
-    criterion = nn.MSELoss()
+    # Define loss function based on user choice
+    if loss_type == 'mse':
+        criterion = nn.MSELoss()
+        print("Using MSE loss")
+    elif loss_type == 'l1':
+        criterion = nn.L1Loss()
+        print("Using L1 loss (MAE)")
+    elif loss_type == 'combo':
+        criterion = ComboLoss(mse_weight=0.7, l1_weight=0.3)
+        print("Using combo loss (70% MSE + 30% L1)")
+    else:
+        print(f"Unknown loss type: {loss_type}, defaulting to MSE")
+        criterion = nn.MSELoss()
+    
+    # Create optimizer
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
+    # Add learning rate scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5, verbose=True, min_lr=1e-6
+    )
+    
     # Training loop
-    for epoch in range(NUM_EPOCHS):
+    best_loss = float('inf')
+    epochs_without_improvement = 0
+    
+    for epoch in range(max_epochs):
         model.train()
         running_loss = 0.0
         
-        with tqdm(dataloader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS}") as pbar:
+        with tqdm(dataloader, desc=f"Epoch {epoch+1}/{max_epochs}") as pbar:
             for i, data in enumerate(pbar):
                 mixed_mag = data['mixed_mag'].to(DEVICE)
                 target_mask = data['target_mask'].to(DEVICE)
@@ -146,11 +187,49 @@ def train_model(window_size, use_pregenerated=False, num_examples=1000):
                 
                 # Backward pass and optimize
                 loss.backward()
+                
+                # Apply gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
                 optimizer.step()
                 
                 # Update statistics
                 running_loss += loss.item()
-                pbar.set_postfix(loss=running_loss / (i + 1))
+                pbar.set_postfix(loss=running_loss / (i + 1), 
+                                lr=optimizer.param_groups[0]['lr'])
+        
+        # Calculate average loss for this epoch
+        avg_loss = running_loss / len(dataloader)
+        
+        # Update learning rate scheduler
+        scheduler.step(avg_loss)
+        
+        # Check if loss improved
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            epochs_without_improvement = 0
+            
+            # Save best model
+            best_model_path = os.path.join(OUTPUT_DIR, f'{model_id}_best.pth')
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': best_loss,
+                'window_size_ms': window_size_ms,
+                'window_samples': window_samples,
+                'hop_length': hop_length,
+                'n_fft': n_fft
+            }, best_model_path)
+            print(f"New best model saved with loss: {best_loss:.6f}")
+        else:
+            epochs_without_improvement += 1
+            print(f"No improvement for {epochs_without_improvement} epochs. Best loss: {best_loss:.6f}")
+            
+            # Early stopping check
+            if epochs_without_improvement >= patience:
+                print(f"Early stopping after {epoch+1} epochs without improvement")
+                break
         
         # Save model checkpoint
         if (epoch + 1) % 10 == 0:
@@ -177,6 +256,7 @@ def train_model(window_size, use_pregenerated=False, num_examples=1000):
         'n_fft': n_fft
     }, final_model_path)
     print(f'Training completed and model saved to {final_model_path}!')
+    print(f'Best model saved to {os.path.join(OUTPUT_DIR, f"{model_id}_best.pth")} with loss: {best_loss:.6f}')
 
 def main():
     parser = argparse.ArgumentParser(description='Train voice isolation model with specific window size')
@@ -185,10 +265,18 @@ def main():
     parser.add_argument('--all', action='store_true', help='Train all window size models')
     parser.add_argument('--prepare-only', action='store_true', help='Only prepare training data, don\'t train')
     
-    # New arguments for pre-generated datasets
+    # Existing arguments for pre-generated datasets
     parser.add_argument('--pregenerate', action='store_true', help='Use pre-generated dataset for training')
     parser.add_argument('--generate-only', action='store_true', help='Only generate dataset, don\'t train')
     parser.add_argument('--num-examples', type=int, default=1000, help='Number of examples to pre-generate')
+    
+    # New training control arguments
+    parser.add_argument('--loss', type=str, choices=['mse', 'l1', 'combo'], default='combo',
+                       help='Loss function to use (default: combo)')
+    parser.add_argument('--patience', type=int, default=10, 
+                       help='Early stopping patience - epochs without improvement (default: 10)')
+    parser.add_argument('--max-epochs', type=int, default=None,
+                       help='Maximum number of epochs to train (default: use NUM_EPOCHS from config)')
     
     args = parser.parse_args()
     
@@ -282,11 +370,15 @@ def main():
     if args.all:
         # Train all window sizes
         for window_size in WindowSize:
-            train_model(window_size, use_pregenerated=args.pregenerate, num_examples=args.num_examples)
+            train_model(window_size, use_pregenerated=args.pregenerate, 
+                      num_examples=args.num_examples, loss_type=args.loss,
+                      patience=args.patience, max_epochs=args.max_epochs)
     else:
         # Train specific window size
         window_size = WindowSize[args.window_size]
-        train_model(window_size, use_pregenerated=args.pregenerate, num_examples=args.num_examples)
+        train_model(window_size, use_pregenerated=args.pregenerate, 
+                  num_examples=args.num_examples, loss_type=args.loss,
+                  patience=args.patience, max_epochs=args.max_epochs)
 
 if __name__ == "__main__":
     main()

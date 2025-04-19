@@ -19,8 +19,11 @@ class ConvBlock(nn.Module):
         return self.conv(x)
 
 class UNet(nn.Module):
-    def __init__(self, in_channels=1, out_channels=1, features=N_CHANNELS):
+    def __init__(self, in_channels=1, out_channels=1, features=N_CHANNELS, dropout_rate=0.2):
         super(UNet, self).__init__()
+        
+        # Add dropout to help prevent overfitting
+        self.dropout = nn.Dropout2d(dropout_rate)
         
         self.encoder1 = ConvBlock(in_channels, features)
         self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
@@ -56,15 +59,17 @@ class UNet(nn.Module):
         enc3 = self.encoder3(self.pool2(enc2))
         enc4 = self.encoder4(self.pool3(enc3))
         
-        # Bottleneck
+        # Bottleneck with dropout
         bottleneck = self.bottleneck(self.pool4(enc4))
+        bottleneck = self.dropout(bottleneck)
         
-        # Decoder
+        # Decoder with dropout at deeper layers
         dec4 = self.upconv4(bottleneck)
         # Crop enc4 to match dec4 size
         enc4_cropped = self.crop(enc4, dec4)
         dec4 = torch.cat((dec4, enc4_cropped), dim=1)
         dec4 = self.decoder4(dec4)
+        dec4 = self.dropout(dec4)
         
         dec3 = self.upconv3(dec4)
         # Crop enc3 to match dec3 size
