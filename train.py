@@ -9,11 +9,11 @@ import argparse
 import torch.nn.functional as F
 
 from model import UNet
-from dataset import VoiceSeparationDataset
+from dataset import VoiceSeparationDataset, PreGeneratedVoiceSeparationDataset, generate_dataset
 from config import *
 from prepare_data import prepare_training_data
 
-def train_model(window_size):
+def train_model(window_size, use_pregenerated=False, num_examples=1000):
     # Get window parameters
     params = get_window_params(window_size)
     window_size_ms = params['window_size_ms']
@@ -37,22 +37,42 @@ def train_model(window_size):
         print("Or use your own curated files")
         return
     
-    # Create dataset and dataloader
-    dataset = VoiceSeparationDataset(
-        VOICE_FOR_TRAINING, NOISE_FOR_TRAINING, 
-        window_size_ms=window_size_ms,
-        window_samples=window_samples,
-        hop_length=hop_length,
-        n_fft=n_fft
-    )
+    # Generate dataset ID based on window size
+    model_id = get_model_id(window_size)
+    dataset_dir = os.path.join(DATASETS_DIR, f"{model_id}_dataset")
+    
+    # Create or use pre-generated dataset
+    if use_pregenerated:
+        if not os.path.exists(dataset_dir) or not os.listdir(dataset_dir):
+            print(f"Pre-generating dataset with {num_examples} examples...")
+            generate_dataset(
+                VOICE_FOR_TRAINING, 
+                NOISE_FOR_TRAINING, 
+                dataset_dir,
+                num_examples=num_examples,
+                window_size_ms=window_size_ms,
+                window_samples=window_samples,
+                hop_length=hop_length,
+                n_fft=n_fft
+            )
+        
+        # Use pre-generated dataset
+        dataset = PreGeneratedVoiceSeparationDataset(dataset_dir)
+    else:
+        # Use on-the-fly dataset
+        dataset = VoiceSeparationDataset(
+            VOICE_FOR_TRAINING, NOISE_FOR_TRAINING, 
+            window_size_ms=window_size_ms,
+            window_samples=window_samples,
+            hop_length=hop_length,
+            n_fft=n_fft
+        )
+    
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     
     # Define loss function and optimizer
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    
-    # Model ID
-    model_id = get_model_id(window_size)
     
     # Training loop
     for epoch in range(NUM_EPOCHS):
@@ -134,6 +154,11 @@ def main():
     parser.add_argument('--all', action='store_true', help='Train all window size models')
     parser.add_argument('--prepare-only', action='store_true', help='Only prepare training data, don\'t train')
     
+    # New arguments for pre-generated datasets
+    parser.add_argument('--pregenerate', action='store_true', help='Use pre-generated dataset for training')
+    parser.add_argument('--generate-only', action='store_true', help='Only generate dataset, don\'t train')
+    parser.add_argument('--num-examples', type=int, default=1000, help='Number of examples to pre-generate')
+    
     args = parser.parse_args()
     
     # Check if only data preparation is requested
@@ -144,14 +169,54 @@ def main():
         print(f"and from PREPROCESSED_NOISE to {NOISE_FOR_TRAINING} that you want to use for training")
         return
     
+    # Only generate dataset without training
+    if args.generate_only:
+        if args.all:
+            # Generate datasets for all window sizes
+            for window_size in WindowSize:
+                params = get_window_params(window_size)
+                model_id = get_model_id(window_size)
+                dataset_dir = os.path.join(DATASETS_DIR, f"{model_id}_dataset")
+                
+                print(f"Generating dataset for {window_size.name} ({window_size.value}ms) window size...")
+                generate_dataset(
+                    VOICE_FOR_TRAINING, 
+                    NOISE_FOR_TRAINING, 
+                    dataset_dir,
+                    num_examples=args.num_examples,
+                    window_size_ms=params['window_size_ms'],
+                    window_samples=params['window_samples'],
+                    hop_length=params['hop_length'],
+                    n_fft=params['n_fft']
+                )
+        else:
+            # Generate dataset for specific window size
+            window_size = WindowSize[args.window_size]
+            params = get_window_params(window_size)
+            model_id = get_model_id(window_size)
+            dataset_dir = os.path.join(DATASETS_DIR, f"{model_id}_dataset")
+            
+            print(f"Generating dataset for {window_size.name} ({window_size.value}ms) window size...")
+            generate_dataset(
+                VOICE_FOR_TRAINING, 
+                NOISE_FOR_TRAINING, 
+                dataset_dir,
+                num_examples=args.num_examples,
+                window_size_ms=params['window_size_ms'],
+                window_samples=params['window_samples'],
+                hop_length=params['hop_length'],
+                n_fft=params['n_fft']
+            )
+        return
+    
     if args.all:
         # Train all window sizes
         for window_size in WindowSize:
-            train_model(window_size)
+            train_model(window_size, use_pregenerated=args.pregenerate, num_examples=args.num_examples)
     else:
         # Train specific window size
         window_size = WindowSize[args.window_size]
-        train_model(window_size)
+        train_model(window_size, use_pregenerated=args.pregenerate, num_examples=args.num_examples)
 
 if __name__ == "__main__":
     main()

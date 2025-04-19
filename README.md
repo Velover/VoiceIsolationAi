@@ -87,9 +87,45 @@ python train.py --window-size XLARGE  # 2000ms window
 
 # Train models for all window sizes sequentially
 python train.py --all
+
+# Use pre-generated dataset for faster training
+python train.py --pregenerate
+
+# Only generate the dataset without training
+python train.py --generate-only --num-examples 2000
+
+# Generate datasets for all window sizes
+python train.py --generate-only --all --num-examples 1000
 ```
 
 Training will save models to the OUTPUT directory with names like `voice_isolation_ai_30.pth` for a 30ms window model.
+
+## Pre-generated Datasets
+
+To speed up training, you can pre-generate datasets:
+
+```bash
+# Generate 1000 examples (default) for SMALL window size model
+python train.py --generate-only
+
+# Generate 2000 examples for MEDIUM window size model
+python train.py --generate-only --window-size MEDIUM --num-examples 2000
+
+# Generate for all window sizes
+python train.py --generate-only --all --num-examples 1000
+```
+
+Then train using the pre-generated datasets:
+
+```bash
+# Train using pre-generated dataset
+python train.py --pregenerate
+
+# Train all window sizes using pre-generated datasets
+python train.py --all --pregenerate
+```
+
+This approach significantly speeds up training as it avoids dataset generation between epochs.
 
 ## Processing Commands
 

@@ -62,6 +62,7 @@ VOICE_FOR_TRAINING = "VOICE_FOR_TRAINING"
 NOISE_FOR_TRAINING = "NOISE_FOR_TRAINING" 
 SAMPLES_DIR = "SAMPLES"
 OUTPUT_DIR = "OUTPUT"
+DATASETS_DIR = "DATASETS"  # Directory for pre-generated datasets
 
 # Model ID format
 def get_model_id(window_size):
@@ -78,5 +79,6 @@ MAX_SNR = 20  # dB
 N_CHANNELS = 32  # Starting number of channels in U-Net
 
 # Create directories if they don't exist
-for directory in [OUTPUT_DIR, PREPROCESSED_VOICE, PREPROCESSED_NOISE, VOICE_FOR_TRAINING, NOISE_FOR_TRAINING, SAMPLES_DIR]:
+for directory in [OUTPUT_DIR, PREPROCESSED_VOICE, PREPROCESSED_NOISE, VOICE_FOR_TRAINING, 
+                 NOISE_FOR_TRAINING, SAMPLES_DIR, DATASETS_DIR]:
     os.makedirs(directory, exist_ok=True)
