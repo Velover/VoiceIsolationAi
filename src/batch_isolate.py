@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from tqdm import tqdm
 import concurrent.futures
+import torchaudio
 
 from .config import OUTPUT_DIR, WINDOW_SIZES
 from .inference import process_audio
@@ -49,6 +50,16 @@ def batch_process(
     device = torch.device("cuda" if torch.cuda.is_available() and use_gpu else "cpu")
     print(f"Using device: {device}")
     
+    # Print additional info about the files
+    if len(audio_files) > 0:
+        example_file = audio_files[0]
+        try:
+            audio, sr = torchaudio.load(example_file)
+            duration = audio.shape[1] / sr
+            print(f"Example file duration: {duration:.2f} seconds")
+        except Exception:
+            pass
+    
     # Process files
     start_time = time.time()
     total_files = len(audio_files)
@@ -84,12 +95,27 @@ def batch_process(
                 if device.type == 'cuda':
                     torch.cuda.synchronize()
                 
-                # Process with less console output
-                process_audio(file_path, output_path, model_path, device, verbose=False)
+                # For better error reporting
+                print(f"Starting processing: {filename}")
+                
+                # Process with verbose output for troubleshooting
+                process_audio(file_path, output_path, model_path, device, verbose=True)
                 
                 # Verify file was created
                 if os.path.exists(output_path):
-                    return (file_path, output_path, True, None)
+                    # Validate the output file has sound (not all zeros)
+                    try:
+                        audio, _ = torchaudio.load(output_path)
+                        max_amplitude = audio.abs().max().item()
+                        if max_amplitude < 0.01:
+                            print(f"WARNING: Output file {filename} has very low amplitude: {max_amplitude:.6f}")
+                            # Still return success but with a warning
+                            return (file_path, output_path, True, f"Low amplitude: {max_amplitude:.6f}")
+                        
+                        print(f"Successfully processed: {filename} (Max amplitude: {max_amplitude:.4f})")
+                        return (file_path, output_path, True, None)
+                    except Exception as e:
+                        return (file_path, output_path, False, f"Error validating output: {str(e)}")
                 else:
                     return (file_path, output_path, False, "Output file not created")
             except Exception as e:

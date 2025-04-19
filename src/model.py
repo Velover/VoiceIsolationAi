@@ -72,11 +72,21 @@ class VoiceIsolationModel(nn.Module):
         if x.dim() == 3:
             x = x.unsqueeze(1)  # Add channel dimension
             
+        # Add a small constant to ensure we get non-zero values even with poor initialization
+        # This helps prevent completely silent output during initial usage
+        base_value = 0.2
+        
         # Encoder
         encoded = self.encoder(x)
         
         # Decoder
         mask = self.decoder(encoded)
+        
+        # Add a small constant offset to ensure non-zero mask values
+        # This ensures at least some of the signal gets through even with a poorly trained model
+        mask = mask + base_value
+        # Re-normalize to keep sigmoid range
+        mask = torch.clamp(mask, 0.0, 1.0)
         
         # Ensure the output has the correct frequency dimension
         if mask.shape[2] != freq_bins:
@@ -230,6 +240,9 @@ class VoiceIsolationModelDeep(nn.Module):
         if x.dim() == 3:
             x = x.unsqueeze(1)  # Add channel dimension
             
+        # Add a small constant to ensure we get non-zero values even with poor initialization
+        base_value = 0.2
+        
         # Encoder with residual computation
         encoded = self.encoder(x)
         
@@ -241,6 +254,12 @@ class VoiceIsolationModelDeep(nn.Module):
         
         # Decoder
         mask = self.decoder(encoded)
+        
+        # Add a small constant offset to ensure non-zero mask values
+        # This ensures at least some of the signal gets through even with a poorly trained model
+        mask = mask + base_value
+        # Re-normalize to keep sigmoid range
+        mask = torch.clamp(mask, 0.0, 1.0)
         
         # Ensure the output has the correct frequency dimension
         if mask.shape[2] != freq_bins:

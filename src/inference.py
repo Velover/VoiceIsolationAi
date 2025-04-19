@@ -2,11 +2,12 @@ import os
 import torch
 import torchaudio
 import argparse
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 import time
+import math
 
 from .config import OUTPUT_DIR, N_FFT, HOP_LENGTH, SAMPLE_RATE, SPEC_TIME_DIM, WINDOW_SIZES
 from .preprocessing import AudioPreprocessor
@@ -100,110 +101,304 @@ def process_audio(
     start = time.time()
     audio = preprocessor.load_audio(input_path)
     duration = time.time() - start
-    duration_seconds = audio.shape[1] / SAMPLE_RATE
+    audio_duration_seconds = audio.shape[1] / SAMPLE_RATE
     if verbose:
-        print(f" Done in {duration:.2f}s (Audio length: {duration_seconds:.2f}s)")
+        print(f" Done in {duration:.2f}s (Audio length: {audio_duration_seconds:.2f}s)")
     
-    # Compute STFT
+    # Calculate window size in samples
+    window_ms = WINDOW_SIZES.get(window_size, 500)
+    window_samples = int(SAMPLE_RATE * window_ms / 1000)
+    
+    # Calculate hop size for overlapping windows (50% overlap is ideal for isolation)
+    hop_samples = window_samples // 2
+    
+    # Number of windows needed to cover the entire audio
+    num_windows = math.ceil((audio.shape[1] - window_samples) / hop_samples) + 1
+    
     if verbose:
-        print("[3/6] Computing STFT...", end="")
+        print(f"[3/6] Processing with sliding window approach...")
+        print(f"       Audio length: {audio_duration_seconds:.2f}s, Window size: {window_ms}ms")
+        print(f"       Processing {num_windows} windows with 50% overlap")
+        print(f"       Window samples: {window_samples}, Hop samples: {hop_samples}")
+    
+    # Create a tensor to accumulate the output audio and weights
+    output_audio = torch.zeros_like(audio)
+    weight = torch.zeros_like(audio)
+    
+    # Track mask statistics for debugging
+    mask_means = []
+    mask_maxes = []
+    mask_mins = []
+    
+    # Using a standard Hann window for correct overlap-add
+    window_envelope = torch.hann_window(window_samples, dtype=audio.dtype, device=audio.device)
+    window_envelope = window_envelope.unsqueeze(0)  # Add channel dimension
+    
+    # Save a copy of the original audio for fallback and comparison
+    original_audio = audio.clone()
+    
+    # Process each window
     start = time.time()
-    stft = preprocessor.compute_stft(audio)
-    duration = time.time() - start
+    windows_progress = tqdm(range(num_windows), desc="Processing windows", disable=not verbose)
+    
+    # Create a debug file to visualize mask statistics
+    debug_info = []
+    
+    for i in windows_progress:
+        # Calculate window boundaries
+        start_sample = i * hop_samples
+        end_sample = min(start_sample + window_samples, audio.shape[1])
+        
+        # Extract window from audio
+        window_audio = audio[:, start_sample:end_sample]
+        
+        # If the window is smaller than expected (last window), pad it
+        actual_window_size = window_audio.shape[1]
+        if actual_window_size < window_samples:
+            padded = torch.zeros((1, window_samples), dtype=window_audio.dtype, device=window_audio.device)
+            padded[:, :actual_window_size] = window_audio
+            window_audio = padded
+        
+        # Process this window
+        try:
+            # Compute STFT for this window
+            stft = preprocessor.compute_stft(window_audio)
+            magnitude = torch.abs(stft)
+            phase = torch.angle(stft)
+            
+            # Standardize for model input
+            magnitude_std = preprocessor.standardize_spectrogram(magnitude)
+            
+            # Prepare input for model
+            model_input = magnitude_std.unsqueeze(0).unsqueeze(0).to(device)
+            
+            # Generate mask
+            with torch.no_grad():
+                device_type = 'cuda' if device.type == 'cuda' else 'cpu'
+                with torch.amp.autocast(device_type=device_type, enabled=device.type == 'cuda', dtype=torch.float16):
+                    mask = model(model_input).squeeze(0).squeeze(0).cpu()
+            
+            # Ensure mask has the right dimensions
+            if magnitude.shape[1] < SPEC_TIME_DIM:
+                mask = mask[:, :magnitude.shape[1]]
+            else:
+                temp_mask = torch.zeros_like(magnitude)
+                temp_mask[:, :mask.shape[1]] = mask[:, :magnitude.shape[1]]
+                mask = temp_mask
+            
+            # Track mask statistics for debugging
+            mask_mean = mask.mean().item()
+            mask_max = mask.max().item()
+            mask_min = mask.min().item()
+            mask_means.append(mask_mean)
+            mask_maxes.append(mask_max)
+            mask_mins.append(mask_min)
+            
+            # Save information for debugging
+            debug_info.append({
+                'window': i,
+                'start_sample': start_sample,
+                'end_sample': end_sample,
+                'mask_mean': mask_mean,
+                'mask_max': mask_max,
+                'mask_min': mask_min
+            })
+            
+            # Move tensors to CPU for consistent processing
+            magnitude = magnitude.cpu()
+            phase = phase.cpu()
+            mask = mask.cpu()
+            
+            # Apply mask adjustment logic based on what we see
+            # CRITICAL CHANGE: The mask application logic
+            
+            # If mask is too extreme (all 0s or all 1s), make it more useful
+            # We want some variation in the mask to actually isolate voice
+            if mask_max < 0.05:
+                # Mask is blocking everything - replace with moderate mask
+                print(f"\nWARNING: Mask for window {i} is too low (max={mask_max:.4f}). Using raised mask.")
+                mask = torch.ones_like(mask) * 0.5
+            elif mask_mean > 0.9:
+                # Mask is letting everything through - apply more aggressive masking
+                print(f"\nWARNING: Mask for window {i} is too high (mean={mask_mean:.4f}). Applying threshold.")
+                # Subtract a baseline and rescale to make mask more discriminative
+                mask = torch.clamp((mask - 0.5) * 2, 0.0, 1.0)
+            
+            # Enhance contrast in the mask to make isolation more effective
+            # This helps separate voice from background more clearly
+            mask = torch.pow(mask, 0.7)  # Power < 1.0 increases contrast
+            
+            # Re-calculate statistics after adjustment
+            adj_mask_mean = mask.mean().item()
+            adj_mask_max = mask.max().item()
+            
+            # Print mask statistics for informative windows
+            if i % 10 == 0 and verbose:
+                print(f"\nMask stats (window {i}): original mean={mask_mean:.4f}, adjusted mean={adj_mask_mean:.4f}")
+            
+            # CRITICAL: Apply mask to isolate voice
+            isolated_magnitude = magnitude * mask
+            
+            # Verify isolated magnitude has non-zero values
+            if isolated_magnitude.abs().max().item() < 1e-8:
+                print(f"\nWARNING: Isolated magnitude for window {i} is all zeros!")
+                # Use original magnitude scaled down as fallback
+                isolated_magnitude = magnitude * 0.5
+            
+            # Reconstruct complex STFT
+            isolated_stft = isolated_magnitude * torch.exp(1j * phase)
+            
+            # Convert back to time domain
+            hann_window = torch.hann_window(N_FFT).to(isolated_stft.device)
+            window_isolated_audio = torch.istft(
+                isolated_stft,
+                n_fft=N_FFT,
+                hop_length=HOP_LENGTH,
+                window=hann_window
+            ).unsqueeze(0)  # Add channel dimension
+            
+            # Check if we got valid audio back
+            if torch.isnan(window_isolated_audio).any() or torch.isinf(window_isolated_audio).any():
+                print(f"\nWARNING: NaN or Inf in audio for window {i}. Using original audio.")
+                window_isolated_audio = window_audio * 0.5  # Use original scaled down
+            
+            # CRITICAL FIX: Ensure both tensors are on the same device
+            if window_isolated_audio.device != window_envelope.device:
+                window_isolated_audio = window_isolated_audio.to(window_envelope.device)
+            
+            # Apply window envelope for smooth transitions
+            window_isolated_audio = window_isolated_audio * window_envelope[:, :window_isolated_audio.shape[1]]
+            
+            # Add to output with overlap-add (standard approach for audio processing)
+            output_end = min(start_sample + window_samples, output_audio.shape[1])
+            current_window_size = output_end - start_sample
+            
+            if current_window_size > 0 and window_isolated_audio.shape[1] >= current_window_size:
+                output_audio[:, start_sample:output_end] += window_isolated_audio[:, :current_window_size]
+                weight[:, start_sample:output_end] += window_envelope[:, :current_window_size]
+            
+            # Update progress bar with useful info
+            if verbose:
+                avg_mask = sum(mask_means[-10:]) / min(len(mask_means), 10) if mask_means else 0
+                windows_progress.set_postfix({
+                    'mask_avg': f"{avg_mask:.2f}", 
+                    'max': f"{mask_max:.2f}"
+                })
+                
+        except Exception as e:
+            print(f"\nError processing window {i+1}/{num_windows}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # Summary statistics
     if verbose:
-        print(f" Done in {duration:.2f}s")
+        print(f"\n[4/6] Finalizing output...")
+        if mask_means:
+            print(f"       Mask statistics: mean={sum(mask_means)/len(mask_means):.4f}, max={max(mask_maxes):.4f}, min={min(mask_mins):.4f}")
     
-    # Get magnitude and phase
-    magnitude = torch.abs(stft)
-    phase = torch.angle(stft)
-    
-    # Store original dimensions
-    orig_shape = magnitude.shape
-    
-    # Standardize spectrogram for model input
-    if verbose:
-        print("[4/6] Processing with model...", end="")
-    start = time.time()
-    magnitude_std = preprocessor.standardize_spectrogram(magnitude)
-    
-    # Prepare input for model (add batch and channel dimensions)
-    model_input = magnitude_std.unsqueeze(0).unsqueeze(0).to(device)
-    
-    # Display model input shape if verbose
-    if verbose:
-        print(f"\n       Input shape: {model_input.shape}", end="")
-    
-    # Generate mask with proper device handling for autocast
-    with torch.no_grad():
-        # Correct autocast usage for PyTorch 2.6.0
-        device_type = 'cuda' if device.type == 'cuda' else 'cpu'
-        with torch.amp.autocast(device_type=device_type, enabled=device.type == 'cuda', dtype=torch.float16):
-            mask = model(model_input).squeeze(0).squeeze(0).cpu()
-    
-    duration = time.time() - start
-    if verbose:
-        print(f"\r[4/6] Processing with model... Done in {duration:.2f}s" + " " * 40)
-    
-    # If spectrogram was padded, make sure to use only the relevant part of the mask
-    if orig_shape[1] < SPEC_TIME_DIM:
-        mask = mask[:, :orig_shape[1]]
+    # Check if we have meaningful data in the output
+    # If all weights are zero, something went wrong
+    if weight.abs().max().item() < 1e-8:
+        print("\nERROR: All weights are zero, indicating no valid data was processed.")
+        print("Using original audio with reduced volume as fallback.")
+        output_audio = original_audio * 0.7
     else:
-        # In case the original was longer (should not happen with standardized processing)
-        # Pad the mask with zeros
-        temp_mask = torch.zeros(orig_shape, dtype=mask.dtype)
-        temp_mask[:, :mask.shape[1]] = mask[:, :orig_shape[1]]
-        mask = temp_mask
+        # Normalize by weights - SIMPLIFIED LOGIC
+        epsilon = 1e-10
+        weight = torch.clamp(weight, min=epsilon)  # Avoid division by zero
+        output_audio = output_audio / weight
     
-    # Apply mask to isolate voice
+    # Check if output is silent
+    output_max = output_audio.abs().max().item()
+    if output_max < 0.01:
+        print("\nWARNING: Output is nearly silent. Applying gain.")
+        # Apply gain instead of mixing with original
+        output_audio = output_audio * 5.0  # Increase gain
+        output_max = output_audio.abs().max().item()
+    
+    # Normalize to prevent clipping
+    if output_max > 0.95:
+        output_audio = 0.95 * output_audio / output_max
+    
+    # Print final audio stats
     if verbose:
-        print("[5/6] Applying isolation mask...", end="")
-    start = time.time()
-    
-    # Move everything to CPU before operations to ensure consistent device
-    magnitude = magnitude.cpu()
-    phase = phase.cpu()
-    mask = mask.cpu()
-    
-    isolated_magnitude = magnitude * mask
-    duration = time.time() - start
-    if verbose:
-        print(f" Done in {duration:.2f}s")
-    
-    # Reconstruct complex STFT
-    isolated_stft = isolated_magnitude * torch.exp(1j * phase)
-    
-    # Convert back to audio
-    if verbose:
-        print("[6/6] Converting back to audio...", end="")
-    start = time.time()
-    
-    # Ensure window is on the same device as the STFT
-    hann_window = torch.hann_window(N_FFT).to(isolated_stft.device)
-    
-    isolated_audio = torch.istft(
-        isolated_stft,
-        n_fft=N_FFT,
-        hop_length=HOP_LENGTH,
-        window=hann_window
-    )
-    isolated_audio = isolated_audio.unsqueeze(0)  # Add channel dimension
+        print(f"       Final output statistics: max amplitude={output_audio.abs().max().item():.4f}")
     
     # Save output
+    if verbose:
+        print(f"\n[5/6] Saving output audio...")
+    
+    # Create output directory if needed
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # Save audio file
     torchaudio.save(
         output_path,
-        isolated_audio,
+        output_audio.cpu(),
         SAMPLE_RATE
     )
-    duration = time.time() - start
+    
+    # Save debug audio files
     if verbose:
-        print(f" Done in {duration:.2f}s")
+        print(f"[6/6] Creating comparison files...")
+        
+        # Save a pure version (no mixing)
+        pure_path = os.path.splitext(output_path)[0] + "_pure.wav"
+        torchaudio.save(pure_path, output_audio.cpu(), SAMPLE_RATE)
+        
+        # Save a mix file with 70% isolated, 30% original
+        mixed_path = os.path.splitext(output_path)[0] + "_mix70-30.wav"
+        mixed_audio = 0.7 * output_audio + 0.3 * original_audio
+        torchaudio.save(mixed_path, mixed_audio.cpu(), SAMPLE_RATE)
+        
+        # Save the original file for comparison
+        orig_path = os.path.splitext(output_path)[0] + "_original.wav"
+        torchaudio.save(orig_path, original_audio.cpu(), SAMPLE_RATE)
+        
+        print(f"       Pure isolated audio saved to: {pure_path}")
+        print(f"       70/30 mixed audio saved to: {mixed_path}")
+        print(f"       Original audio saved to: {orig_path}")
+        
+        # Save a visual mask debug report if matplotlib is available
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            plt.figure(figsize=(12, 6))
+            window_indices = [d['window'] for d in debug_info]
+            mask_means_debug = [d['mask_mean'] for d in debug_info]
+            
+            plt.plot(window_indices, mask_means_debug, 'b-', label='Mask Mean')
+            plt.title('Mask Mean Values Across Windows')
+            plt.xlabel('Window Index')
+            plt.ylabel('Mask Mean Value')
+            plt.grid(True)
+            plt.axhline(y=0.5, color='r', linestyle='--', label='Threshold (0.5)')
+            plt.legend()
+            
+            mask_debug_path = os.path.splitext(output_path)[0] + "_mask_debug.png"
+            plt.savefig(mask_debug_path)
+            plt.close()
+            
+            print(f"       Mask debug visualization saved to: {mask_debug_path}")
+        except ImportError:
+            print("       Note: matplotlib not available for mask visualization")
+    
+    # Display important note about model effectiveness
+    if sum(mask_means)/len(mask_means) > 0.9:
+        print("\n⚠️ IMPORTANT: The model is generating very high mask values (mean > 0.9).")
+        print("This means it's letting almost everything through, resulting in minimal isolation.")
+        print("Try training with more diverse data or using a different model.")
+    elif sum(mask_means)/len(mask_means) < 0.1:
+        print("\n⚠️ IMPORTANT: The model is generating very low mask values (mean < 0.1).")
+        print("This means it's blocking almost everything, resulting in silence or very quiet output.")
+        print("Try training with more representative voice samples.")
     
     total_time = time.time() - process_start
     if verbose:
         print(f"\n=== PROCESSING COMPLETE ===")
         print(f"Total processing time: {total_time:.2f}s")
-        print(f"Processing ratio: {total_time/duration_seconds:.2f}x realtime")
+        print(f"Processing ratio: {total_time/audio_duration_seconds:.2f}x realtime")
         print(f"Output saved to: {output_path}")
 
 def main():
