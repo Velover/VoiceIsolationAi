@@ -5,6 +5,7 @@ import numpy as np
 import random
 from pathlib import Path
 from typing import Tuple, List, Dict, Optional
+import time
 
 from .config import (
     SAMPLE_RATE, N_FFT, HOP_LENGTH, 
@@ -29,11 +30,26 @@ class AudioPreprocessor:
         
         self.window_size_ms = WINDOW_SIZES[window_size]
         self.window_size_samples = int(SAMPLE_RATE * self.window_size_ms / 1000)
-        self.use_gpu = use_gpu and USE_GPU
+        
+        # Improved GPU handling
+        self.use_gpu = use_gpu and torch.cuda.is_available()
         self.device = torch.device(f"cuda:{GPU_DEVICE}" if self.use_gpu else "cpu")
         
         # Move the Hann window to GPU for faster STFT computation
         self.window = torch.hann_window(N_FFT).to(self.device)
+        
+        if self.use_gpu:
+            # Verify CUDA is working correctly
+            test_tensor = torch.zeros(1, device=self.device)
+            if test_tensor.device.type != 'cuda':
+                print(f"⚠️ Warning: Failed to allocate tensor on GPU despite CUDA being available")
+                self.use_gpu = False
+                self.device = torch.device("cpu")
+            else:
+                # Print what GPU the processor is using
+                print(f"AudioPreprocessor using GPU: {torch.cuda.get_device_name(GPU_DEVICE)}")
+                # Warm up CUDA for faster first operation
+                torch.cuda.synchronize()
         
     def load_audio(self, file_path: str) -> torch.Tensor:
         """
@@ -65,9 +81,9 @@ class AudioPreprocessor:
             resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=SAMPLE_RATE)
             audio = resampler(audio)
         
-        # Move tensor to GPU if enabled
+        # Move tensor to GPU if enabled - ensure this works
         if self.use_gpu:
-            audio = audio.to(self.device)
+            audio = audio.to(self.device, non_blocking=True)
         
         return audio
     
@@ -149,41 +165,48 @@ class AudioPreprocessor:
         Returns:
             Tuple of (mixed spectrogram, voice mask)
         """
-        # Correct autocast usage for PyTorch 2.6.0
-        device_type = 'cuda' if self.use_gpu else 'cpu'
-        with torch.amp.autocast(device_type=device_type, enabled=self.use_gpu, dtype=torch.float16):
-            # Load voice
-            voice = self.load_audio(voice_path)
+        # Simple approach without autocast for more reliable GPU usage
+        # Load voice
+        voice = self.load_audio(voice_path)
+        
+        # Load noise if provided
+        if noise_path:
+            noise = self.load_audio(noise_path)
             
-            # Load noise if provided
-            if noise_path:
-                noise = self.load_audio(noise_path)
+            # Adjust lengths to match
+            min_length = min(voice.shape[1], noise.shape[1])
+            voice = voice[:, :min_length]
+            noise = noise[:, :min_length]
+            
+            # Mix voice and noise - ensure on same device
+            if voice.device != noise.device:
+                noise = noise.to(voice.device)
                 
-                # Adjust lengths to match
-                min_length = min(voice.shape[1], noise.shape[1])
-                voice = voice[:, :min_length]
-                noise = noise[:, :min_length]
-                
-                # Mix voice and noise
-                noise = noise * (1 - mix_ratio)
-                voice = voice * mix_ratio
-                mixed = voice + noise
-            else:
-                mixed = voice
-            
-            # Compute spectrograms
-            voice_spec = self.compute_spectrogram(voice)
-            mixed_spec = self.compute_spectrogram(mixed)
-            
-            # Create mask (1 where voice is present, 0 elsewhere)
-            # Using a simple threshold for mask creation
-            epsilon = 1e-10  # Small value to avoid division by zero
-            mask = (voice_spec / (mixed_spec + epsilon)) > 0.5
-            mask = mask.float()
-            
-            # Standardize dimensions for batch processing
-            mixed_spec = self.standardize_spectrogram(mixed_spec)
-            mask = self.standardize_spectrogram(mask)
+            noise = noise * (1 - mix_ratio)
+            voice = voice * mix_ratio
+            mixed = voice + noise
+        else:
+            mixed = voice
+        
+        # Compute spectrograms - ensure GPU acceleration if available
+        start = time.time() if self.use_gpu else 0
+        voice_spec = self.compute_spectrogram(voice)
+        mixed_spec = self.compute_spectrogram(mixed)
+        if self.use_gpu:
+            torch.cuda.synchronize()
+            # Uncomment for debugging
+            # comp_time = time.time() - start
+            # print(f"GPU spectrogram computation time: {comp_time*1000:.1f}ms")
+        
+        # Create mask (1 where voice is present, 0 elsewhere)
+        # Using a simple threshold for mask creation
+        epsilon = 1e-10  # Small value to avoid division by zero
+        mask = (voice_spec / (mixed_spec + epsilon)) > 0.5
+        mask = mask.float()
+        
+        # Standardize dimensions for batch processing
+        mixed_spec = self.standardize_spectrogram(mixed_spec)
+        mask = self.standardize_spectrogram(mask)
         
         return mixed_spec, mask
     

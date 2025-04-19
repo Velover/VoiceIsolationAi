@@ -76,22 +76,30 @@ class SpectrogramDataset(Dataset):
             raise ValueError(f"No noise files found in {noise_dir}")
             
         print(f"Found {len(self.voice_files)} voice files and {len(self.noise_files)} noise files")
-        print(f"Using device: {self.device} for sample creation")
         
-        # Pre-calculate a few samples to estimate processing time
-        print("Preparing sample dataset...")
+        # Pre-calculate a few samples to estimate processing time - reduce verbosity
+        print("\n=== PREPARING SAMPLE DATASET ===")
         sample_size = min(5, num_samples)
         
         # Preprocess a small batch to estimate time
         start_time = time.time()
-        for _ in tqdm(range(sample_size), desc="Creating test samples", unit="sample"):
+        for i in range(sample_size):
             self._create_sample()
+            print(f"  Created test sample {i+1}/{sample_size}", end="\r")
+        print() # New line after progress
+        
         avg_time = (time.time() - start_time) / sample_size
         estimated_time = avg_time * num_samples
+        total_min = estimated_time // 60
+        total_sec = estimated_time % 60
         
-        print(f"Estimated time to prepare {num_samples} samples: {estimated_time:.1f} seconds")
+        # More concise output
+        print(f"Sample creation speed: {avg_time:.2f}s per sample")
         if self.use_gpu:
-            print(f"GPU accelerated sample creation enabled (expected {avg_time:.3f}s per sample)")
+            print(f"GPU acceleration: ENABLED ✓")
+        else:
+            print(f"GPU acceleration: DISABLED ✗")
+        print(f"Estimated time to create {num_samples} samples: {total_min:.0f}m {total_sec:.0f}s")
         
     def _create_sample(self):
         """Create a single training sample"""
@@ -141,6 +149,12 @@ class SpectrogramDataset(Dataset):
             mixed_spec = mixed_spec.unsqueeze(0)
             mask = mask.unsqueeze(0)
             
+            # IMPORTANT: Move tensors to CPU before returning - DataLoader will handle pinning/GPU transfer
+            if mixed_spec.device.type != 'cpu':
+                mixed_spec = mixed_spec.cpu()
+            if mask.device.type != 'cpu':
+                mask = mask.cpu()
+            
             return {
                 'mixed': mixed_spec,
                 'mask': mask
@@ -179,27 +193,42 @@ def train_model(
     # Better GPU detection and messaging
     if torch.cuda.is_available() and use_gpu:
         device = torch.device(f"cuda:{GPU_DEVICE}")
-        print(f"✅ GPU acceleration enabled")
         
-        # Print GPU info
-        gpu_name = torch.cuda.get_device_name(GPU_DEVICE)
-        gpu_mem = torch.cuda.get_device_properties(GPU_DEVICE).total_memory / 1024**3
-        print(f"GPU: {gpu_name} with {gpu_mem:.1f} GB memory")
+        # Force CUDA initialization to check if it's really working
+        torch.cuda.synchronize()
         
-        # Clear GPU cache
-        torch.cuda.empty_cache()
+        # Test tensor creation
+        test = torch.ones(1, device=device)
+        if test.device.type == 'cuda':
+            # Get GPU info
+            gpu_name = torch.cuda.get_device_name(GPU_DEVICE)
+            gpu_mem = torch.cuda.get_device_properties(GPU_DEVICE).total_memory / 1024**3
+            print(f"\n=== GPU ACCELERATION ENABLED ===")
+            print(f"Device: {gpu_name} ({gpu_mem:.1f} GB)")
+            
+            # Clear GPU cache
+            torch.cuda.empty_cache()
+            
+            # Measure GPU memory usage before training
+            allocated_before = torch.cuda.memory_allocated(GPU_DEVICE) / 1024**2
+            reserved_before = torch.cuda.memory_reserved(GPU_DEVICE) / 1024**2
+            print(f"Initial GPU Memory: {allocated_before:.1f} MB allocated, {reserved_before:.1f} MB reserved")
+        else:
+            print("⚠️ Failed to create tensor on GPU despite CUDA being available!")
+            print("⚠️ Falling back to CPU...")
+            device = torch.device("cpu")
+            use_gpu = False
     else:
         if not torch.cuda.is_available() and use_gpu:
             print("❌ GPU requested but no CUDA-compatible GPU detected!")
-            print("⚠️ Falling back to CPU...")
         device = torch.device("cpu")
-    
-    print(f"Training on device: {device}")
+        use_gpu = False
+        print("\n=== RUNNING ON CPU ===")
     
     # Initialize preprocessor with GPU support
     preprocessor = AudioPreprocessor(window_size=window_size, use_gpu=use_gpu)
     
-    print(f"Creating dataset with {num_samples} samples...")
+    print(f"\n=== CREATING DATASET ({num_samples} SAMPLES) ===")
     # Create dataset with GPU support
     dataset = SpectrogramDataset(
         voice_dir=VOICE_DIR,
@@ -214,22 +243,29 @@ def train_model(
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
     
-    print(f"Creating data loaders with batch size {batch_size}...")
+    print(f"\n=== PREPARING DATA LOADERS ===")
+    print(f"Training samples: {train_size}")
+    print(f"Validation samples: {val_size}")
+    print(f"Batch size: {batch_size}")
+    
     # Create dataloaders
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
         shuffle=True,
-        num_workers=2
+        num_workers=0 if use_gpu else 2,  # Reduce workers when using GPU to prevent contention
+        pin_memory=use_gpu and device.type == 'cuda'  # Only pin if actually using GPU
     )
     
     val_loader = DataLoader(
         val_dataset, 
         batch_size=batch_size, 
         shuffle=False,
-        num_workers=2
+        num_workers=0 if use_gpu else 2,
+        pin_memory=use_gpu and device.type == 'cuda'  # Only pin if actually using GPU
     )
     
+    print(f"\n=== INITIALIZING MODEL ===")
     # Initialize model, loss, and optimizer
     model = VoiceIsolationModel(n_fft=N_FFT)
     loss_fn = MaskedLoss()
@@ -238,7 +274,14 @@ def train_model(
     # Move model to GPU
     model.to(device)
     
-    # Initialize scaler for mixed precision training with correct PyTorch 2.6.0 API
+    # Verify model is on correct device
+    if use_gpu:
+        model_device = next(model.parameters()).device
+        print(f"Model is on: {model_device}")
+        if model_device.type != 'cuda':
+            print("⚠️ Warning: Model not on GPU despite GPU being enabled!")
+    
+    # Initialize scaler for mixed precision training
     scaler = torch.amp.GradScaler(enabled=use_mixed_precision and device.type == 'cuda')
     
     # Training history
@@ -248,7 +291,9 @@ def train_model(
     }
     
     # Training loop
-    print(f"Starting training for {epochs} epochs...")
+    print(f"\n=== STARTING TRAINING ({epochs} EPOCHS) ===")
+    if use_mixed_precision and device.type == 'cuda':
+        print("Mixed precision (FP16): ENABLED ✓")
     progress_bar = tqdm(range(epochs), desc="Training", unit="epoch")
     
     for epoch in progress_bar:
@@ -266,21 +311,29 @@ def train_model(
         )
         
         for batch in batch_progress:
-            mixed_spec = batch['mixed'].to(device)
-            target_mask = batch['mask'].to(device)
+            # Move batch to device - ensure this happens correctly
+            mixed_spec = batch['mixed'].to(device, non_blocking=True)
+            target_mask = batch['mask'].to(device, non_blocking=True)
             
-            # Forward pass with mixed precision - updated API
+            # Forward pass with mixed precision - simplified approach
             optimizer.zero_grad()
             
-            # Correct autocast usage for PyTorch 2.6.0
-            with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision and device.type == 'cuda', dtype=torch.float16):
+            # Use regular forward pass if mixed precision is disabled or on CPU
+            if use_mixed_precision and device.type == 'cuda':
+                with torch.autocast(device_type=device.type, dtype=torch.float16):
+                    pred_mask = model(mixed_spec)
+                    loss = loss_fn(pred_mask, target_mask)
+                
+                # Backward pass with gradient scaling for mixed precision
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Standard training path
                 pred_mask = model(mixed_spec)
                 loss = loss_fn(pred_mask, target_mask)
-            
-            # Backward pass with gradient scaling for mixed precision
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+                loss.backward()
+                optimizer.step()
             
             # Update progress bar with current loss
             batch_progress.set_postfix(loss=f"{loss.item():.4f}")
@@ -300,8 +353,8 @@ def train_model(
             )
             
             for batch in val_progress:
-                mixed_spec = batch['mixed'].to(device)
-                target_mask = batch['mask'].to(device)
+                mixed_spec = batch['mixed'].to(device, non_blocking=True)
+                target_mask = batch['mask'].to(device, non_blocking=True)
                 
                 # Correct autocast usage for PyTorch 2.6.0
                 with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision and device.type == 'cuda', dtype=torch.float16):
@@ -329,11 +382,13 @@ def train_model(
             'time': f"{epoch_time:.2f}s"
         })
     
-    # Add GPU memory stats after training
+    # Show GPU utilization after training
     if device.type == 'cuda':
         allocated = torch.cuda.memory_allocated(GPU_DEVICE) / 1024**2
         reserved = torch.cuda.memory_reserved(GPU_DEVICE) / 1024**2
-        print(f"GPU Memory: {allocated:.1f} MB allocated, {reserved:.1f} MB reserved")
+        print(f"\n=== GPU MEMORY USAGE ===")
+        print(f"Allocated: {allocated:.1f} MB")
+        print(f"Reserved: {reserved:.1f} MB")
     
     # Save model if path provided
     if model_save_path:
@@ -414,3 +469,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

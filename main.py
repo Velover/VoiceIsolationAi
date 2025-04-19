@@ -22,17 +22,43 @@ def list_gpus():
         print("pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118")
         return
 
-    print(f"CUDA is available with {torch.cuda.device_count()} devices:")
-    for i in range(torch.cuda.device_count()):
-        try:
-            properties = torch.cuda.get_device_properties(i)
-            print(f"  Device {i}: {properties.name}")
-            print(f"    - Total memory: {properties.total_memory / 1024**3:.2f} GB")
-            print(f"    - CUDA Capability: {properties.major}.{properties.minor}")
-        except Exception as e:
-            print(f"  Device {i}: Error getting properties - {e}")
-    
-    print(f"Current device: {torch.cuda.current_device()}")
+    try:
+        # Force CUDA initialization
+        torch.cuda.init()
+        torch.cuda.synchronize()
+        
+        # Test tensor creation on GPU
+        test = torch.ones(1, device=f"cuda:0")
+        
+        print(f"CUDA is available with {torch.cuda.device_count()} devices:")
+        for i in range(torch.cuda.device_count()):
+            try:
+                properties = torch.cuda.get_device_properties(i)
+                print(f"  Device {i}: {properties.name}")
+                print(f"    - Total memory: {properties.total_memory / 1024**3:.2f} GB")
+                print(f"    - CUDA Capability: {properties.major}.{properties.minor}")
+                
+                # Test memory allocation
+                memory_before = torch.cuda.memory_allocated(i)
+                test_tensor = torch.ones((1000, 1000), device=f"cuda:{i}")
+                memory_after = torch.cuda.memory_allocated(i)
+                memory_used = (memory_after - memory_before) / 1024**2
+                print(f"    - Memory allocation test: {memory_used:.2f} MB (should be ~4 MB)")
+                del test_tensor
+                torch.cuda.empty_cache()
+            except Exception as e:
+                print(f"  Device {i}: Error getting properties - {e}")
+        
+        print(f"Current device: {torch.cuda.current_device()}")
+        
+        # Additional CUDA info
+        print("\nCUDA Environment:")
+        print(f"  PyTorch version: {torch.__version__}")
+        print(f"  CUDA version: {torch.version.cuda}")
+        print(f"  cuDNN version: {torch.backends.cudnn.version()}")
+    except Exception as e:
+        print(f"Error testing CUDA: {e}")
+        print("Your CUDA installation might be incomplete or corrupted.")
 
 def main():
     parser = argparse.ArgumentParser(description='Voice Isolation AI')
