@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+import time
 
 from .config import OUTPUT_DIR, N_FFT, HOP_LENGTH, SAMPLE_RATE, SPEC_TIME_DIM
 from .preprocessing import AudioPreprocessor
@@ -53,21 +54,38 @@ def process_audio(
         model_path: Path to trained model
         device: Device to run inference on
     """
+    process_start = time.time()
+    print(f"=== VOICE ISOLATION PROCESSING ===")
+    print(f"Input: {input_path}")
+    print(f"Output: {output_path}")
+    print(f"Model: {model_path}")
+    print(f"Device: {device}")
+    
     # Load model
-    print("Loading model...")
+    print("\n[1/6] Loading model...", end="")
+    start = time.time()
     model, window_size = load_model(model_path, device)
+    duration = time.time() - start
+    print(f" Done in {duration:.2f}s")
     
     # Initialize preprocessor with use_gpu flag based on device
     use_gpu = device.type == 'cuda'
     preprocessor = AudioPreprocessor(window_size=window_size, use_gpu=use_gpu)
     
     # Load audio
-    print(f"Loading audio file: {input_path}")
+    print(f"[2/6] Loading audio file...", end="")
+    start = time.time()
     audio = preprocessor.load_audio(input_path)
+    duration = time.time() - start
+    duration_seconds = audio.shape[1] / SAMPLE_RATE
+    print(f" Done in {duration:.2f}s (Audio length: {duration_seconds:.2f}s)")
     
     # Compute STFT
-    print("Computing STFT...")
+    print("[3/6] Computing STFT...", end="")
+    start = time.time()
     stft = preprocessor.compute_stft(audio)
+    duration = time.time() - start
+    print(f" Done in {duration:.2f}s")
     
     # Get magnitude and phase
     magnitude = torch.abs(stft)
@@ -77,19 +95,25 @@ def process_audio(
     orig_shape = magnitude.shape
     
     # Standardize spectrogram for model input
-    print("Processing audio with model...")
+    print("[4/6] Processing with model...", end="")
+    start = time.time()
     magnitude_std = preprocessor.standardize_spectrogram(magnitude)
     
     # Prepare input for model (add batch and channel dimensions)
     model_input = magnitude_std.unsqueeze(0).unsqueeze(0).to(device)
     
+    # Display model input shape
+    print(f"\n       Input shape: {model_input.shape}", end="")
+    
     # Generate mask with proper device handling for autocast
     with torch.no_grad():
-        print("Generating isolation mask...")
         # Correct autocast usage for PyTorch 2.6.0
         device_type = 'cuda' if device.type == 'cuda' else 'cpu'
         with torch.amp.autocast(device_type=device_type, enabled=device.type == 'cuda', dtype=torch.float16):
             mask = model(model_input).squeeze(0).squeeze(0).cpu()
+    
+    duration = time.time() - start
+    print(f"\r[4/6] Processing with model... Done in {duration:.2f}s" + " " * 40)
     
     # If spectrogram was padded, make sure to use only the relevant part of the mask
     if orig_shape[1] < SPEC_TIME_DIM:
@@ -102,14 +126,18 @@ def process_audio(
         mask = temp_mask
     
     # Apply mask to isolate voice
-    print("Applying mask to isolate voice...")
+    print("[5/6] Applying isolation mask...", end="")
+    start = time.time()
     isolated_magnitude = magnitude * mask
+    duration = time.time() - start
+    print(f" Done in {duration:.2f}s")
     
     # Reconstruct complex STFT
     isolated_stft = isolated_magnitude * torch.exp(1j * phase)
     
     # Convert back to audio
-    print("Converting processed spectrogram back to audio...")
+    print("[6/6] Converting back to audio...", end="")
+    start = time.time()
     isolated_audio = torch.istft(
         isolated_stft,
         n_fft=N_FFT,
@@ -120,14 +148,19 @@ def process_audio(
     
     # Save output
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    print(f"Saving processed audio to {output_path}")
     torchaudio.save(
         output_path,
         isolated_audio,
         SAMPLE_RATE
     )
+    duration = time.time() - start
+    print(f" Done in {duration:.2f}s")
     
-    print(f"Processing complete: {input_path} → {output_path}")
+    total_time = time.time() - process_start
+    print(f"\n=== PROCESSING COMPLETE ===")
+    print(f"Total processing time: {total_time:.2f}s")
+    print(f"Processing ratio: {total_time/duration_seconds:.2f}x realtime")
+    print(f"Output saved to: {output_path}")
 
 def main():
     """Main function for inference"""

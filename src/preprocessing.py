@@ -69,6 +69,10 @@ class AudioPreprocessor:
         if file_ext not in SUPPORTED_FORMATS:
             raise ValueError(f"Unsupported file format: {file_ext}. Supported formats: {SUPPORTED_FORMATS}")
         
+        # Get file size for progress reporting
+        file_size = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
+        print(f"Loading: {os.path.basename(file_path)} ({file_size:.2f} MB)")
+        
         # Load audio file
         audio, sr = torchaudio.load(file_path)
         
@@ -78,12 +82,17 @@ class AudioPreprocessor:
         
         # Resample if needed
         if sr != SAMPLE_RATE:
+            print(f"Resampling from {sr}Hz to {SAMPLE_RATE}Hz...")
             resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=SAMPLE_RATE)
             audio = resampler(audio)
         
         # Move tensor to GPU if enabled - ensure this works
         if self.use_gpu:
             audio = audio.to(self.device, non_blocking=True)
+        
+        # Print audio stats
+        duration = audio.shape[1] / SAMPLE_RATE
+        print(f"Audio loaded: {duration:.2f}s, {audio.shape[1]} samples")
         
         return audio
     

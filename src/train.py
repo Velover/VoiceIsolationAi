@@ -179,14 +179,15 @@ class CachedSpectrogramDataset(Dataset):
         print("\n=== PREPARING SAMPLE DATASET ===")
         sample_size = min(5, self.num_samples)
         
+        progress_bar = tqdm(range(sample_size), desc="Creating test samples", unit="sample")
         start_time = time.time()
-        for i in range(sample_size):
+        for i in progress_bar:
             self._create_sample()
-            print(f"  Created test sample {i+1}/{sample_size}", end="\r")
-        print()
         
         avg_time = (time.time() - start_time) / sample_size
         print(f"Sample creation speed: {avg_time:.2f}s per sample")
+        total_est_time = avg_time * self.num_samples / (len(self.worker_threads) + 1)
+        print(f"Estimated total preparation time: {total_est_time:.1f}s with {len(self.worker_threads) + 1} workers")
         print(f"Using {'cached' if self.voice_cache_available else 'raw'} data")
         
         if self.use_gpu:
@@ -545,7 +546,21 @@ def train_model(
     print(f"\n=== STARTING TRAINING ({epochs} EPOCHS) ===")
     if use_mixed_precision and device.type == 'cuda':
         print("Mixed precision (FP16): ENABLED ✓")
-    progress_bar = tqdm(range(epochs), desc="Training", unit="epoch")
+    
+    # Calculate total steps for progress tracking
+    total_steps = epochs * len(train_loader)
+    start_training_time = time.time()
+    
+    # Create custom progress bar
+    progress_bar = tqdm(
+        range(epochs), 
+        desc="Training Progress", 
+        unit="epoch",
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+    )
+    
+    # Store batch timing information
+    batch_times = []
     
     # Create CUDA streams for overlapping operations
     if device.type == 'cuda':
@@ -567,7 +582,7 @@ def train_model(
         # Training phase
         model.train()
         train_loss = 0.0
-        start_time = time.time()
+        epoch_start_time = time.time()
         
         # Progress tracking
         batch_count = len(train_loader)
@@ -577,6 +592,7 @@ def train_model(
         train_iter = iter(train_loader)
         
         while batch_idx < batch_count:
+            batch_start = time.time()
             # Use prefetched batch if available, otherwise get next batch
             if device.type == 'cuda' and next_batch is not None:
                 batch = next_batch
@@ -641,11 +657,34 @@ def train_model(
             
             # Update progress
             train_loss += loss.item()
+            batch_times.append(time.time() - batch_start)
+            
+            # Calculate average stats for last 50 batches
+            recent_batch_times = batch_times[-50:]
+            avg_batch_time = sum(recent_batch_times) / len(recent_batch_times)
+            global_step = epoch * batch_count + batch_idx
+            progress_percent = 100.0 * global_step / total_steps
+            
+            # Calculate ETA
+            elapsed = time.time() - start_training_time
+            steps_done = global_step
+            steps_remaining = total_steps - steps_done
+            eta_seconds = avg_batch_time * steps_remaining if steps_done > 0 else 0
+            
+            # Calculate memory stats
+            if device.type == 'cuda':
+                mem_allocated = torch.cuda.memory_allocated(GPU_DEVICE) / 1024**3  # GB
+                mem_reserved = torch.cuda.memory_reserved(GPU_DEVICE) / 1024**3  # GB
+                mem_str = f", Mem: {mem_allocated:.1f}/{mem_reserved:.1f} GB"
+            else:
+                mem_str = ""
             
             # Create a custom progress indicator to avoid tqdm overhead
             if batch_idx % 5 == 0 or batch_idx == batch_count:
-                percent = 100.0 * batch_idx / batch_count
-                print(f"\rTraining: {percent:.1f}% [{batch_idx}/{batch_count}] Loss: {loss.item():.4f}", end="")
+                eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
+                print(f"\rTraining: {progress_percent:.1f}% [{batch_idx}/{batch_count}] "
+                      f"Loss: {loss.item():.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}, "
+                      f"Batch: {avg_batch_time*1000:.1f}ms, ETA: {eta_str}{mem_str}", end="")
         
         print()  # New line after progress tracking
         
@@ -656,9 +695,10 @@ def train_model(
         with torch.no_grad():
             val_progress = tqdm(
                 val_loader, 
-                desc=f"Validating", 
+                desc=f"Validating (Epoch {epoch+1}/{epochs})", 
                 leave=False,
-                unit="batch"
+                unit="batch",
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
             )
             
             for batch in val_progress:
@@ -679,6 +719,18 @@ def train_model(
         avg_train_loss = train_loss / len(train_loader)
         avg_val_loss = val_loss / len(val_loader)
         
+        # Calculate epoch stats
+        epoch_time = time.time() - epoch_start_time
+        epoch_percent = 100.0 * (epoch + 1) / epochs
+        total_elapsed = time.time() - start_training_time
+        eta_seconds = (total_elapsed / (epoch + 1)) * (epochs - epoch - 1)
+        eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
+        
+        # Print epoch summary
+        print(f"Epoch {epoch+1}/{epochs} ({epoch_percent:.1f}%) - "
+              f"Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, "
+              f"Time: {epoch_time:.1f}s, ETA: {eta_str}")
+        
         # Update history
         history['train_loss'].append(avg_train_loss)
         history['val_loss'].append(avg_val_loss)
@@ -689,15 +741,6 @@ def train_model(
         # Save current learning rate to history
         current_lr = optimizer.param_groups[0]['lr']
         history['learning_rates'].append(current_lr)
-        
-        # Update epoch progress bar
-        epoch_time = time.time() - start_time
-        progress_bar.set_postfix({
-            'train_loss': f"{avg_train_loss:.4f}",
-            'val_loss': f"{avg_val_loss:.4f}",
-            'lr': f"{current_lr:.6f}",
-            'time': f"{epoch_time:.2f}s"
-        })
     
     # Stop GPU monitoring if started
     if use_gpu and 'gpu_monitor' in locals() and gpu_monitor is not None:
