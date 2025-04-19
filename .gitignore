@@ -33,6 +33,7 @@ Thumbs.db
 VOICE/
 NOISE/
 CACHE/
+TEST/
 
 
 # Output directory with trained models

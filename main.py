@@ -126,6 +126,27 @@ def main():
     # GPU Info command
     subparsers.add_parser('gpu-info', help='List available GPUs and their properties')
     
+    # Generate Test Audio command
+    test_audio_parser = subparsers.add_parser('generate-test', help='Generate test audio by mixing voice and noise')
+    test_audio_parser.add_argument('--output-dir', default='TEST', help='Directory to save test files')
+    test_audio_parser.add_argument('--num-files', type=int, default=5, help='Number of test files to generate')
+    test_audio_parser.add_argument('--duration', type=int, default=20, help='Duration of each file in seconds')
+    test_audio_parser.add_argument('--min-snr', type=float, default=3.0, help='Minimum SNR in dB')
+    test_audio_parser.add_argument('--max-snr', type=float, default=10.0, help='Maximum SNR in dB')
+    
+    # Add List Models command
+    list_models_parser = subparsers.add_parser('list-models', help='List trained models and their information')
+    list_models_parser.add_argument('--verbose', '-v', action='store_true', help='Show detailed information')
+    list_models_parser.add_argument('--dir', default=OUTPUT_DIR, help='Directory containing models')
+    
+    # Add Batch Isolation command
+    batch_parser = subparsers.add_parser('isolate-batch', help='Process all files in test directory')
+    batch_parser.add_argument('--model', required=True, help='Path to trained model')
+    batch_parser.add_argument('--input-dir', default='TEST/MIXED', help='Directory with mixed audio files')
+    batch_parser.add_argument('--output-dir', default='TEST/ISOLATED', help='Directory to save isolated files')
+    batch_parser.add_argument('--gpu', action='store_true', default=True, help='Use GPU acceleration')
+    batch_parser.add_argument('--workers', type=int, default=1, help='Number of parallel workers (1=sequential)')
+    
     args = parser.parse_args()
     
     if args.command == 'train':
@@ -197,6 +218,30 @@ def main():
         generate_samples_main()
     elif args.command == 'gpu-info':
         list_gpus()
+    elif args.command == 'generate-test':
+        # Import and run test audio generation script
+        from generate_test_audio import create_test_files
+        create_test_files(
+            output_dir=args.output_dir,
+            num_files=args.num_files,
+            duration=args.duration,
+            min_snr=args.min_snr,
+            max_snr=args.max_snr
+        )
+    elif args.command == 'list-models':
+        # Import and run model listing utility
+        from src.list_models import list_models
+        list_models(args.dir, args.verbose)
+    elif args.command == 'isolate-batch':
+        # Import and run batch isolation
+        from src.batch_isolate import batch_process
+        batch_process(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            model_path=args.model,
+            use_gpu=args.gpu,
+            num_workers=args.workers
+        )
     else:
         parser.print_help()
 

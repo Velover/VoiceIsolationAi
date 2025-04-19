@@ -264,9 +264,13 @@ class AudioPreprocessor:
             complex_spec,
             n_fft=N_FFT,
             hop_length=HOP_LENGTH,
-            window=torch.hann_window(N_FFT)
+            window=torch.hann_window(N_FFT).to(complex_spec.device)
         )
         
+        # Move to CPU if needed
+        if audio.device.type == 'cuda':
+            audio = audio.cpu()
+            
         return audio.unsqueeze(0)  # Add channel dimension
 
     def preload_files(self, file_paths: List[str], max_files: int = 10) -> Dict[str, torch.Tensor]:

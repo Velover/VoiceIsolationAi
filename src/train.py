@@ -618,7 +618,10 @@ def train_model(
             'optimizer_state_dict': optimizer.state_dict(),
             'history': history,
             'window_size': window_size,
-            'n_fft': N_FFT
+            'n_fft': N_FFT,
+            'deep_model': use_deep_model,  # Save if deep model was used
+            'creation_date': time.strftime("%Y-%m-%d"),
+            'training_samples': num_samples
         }, model_save_path)
         print(f"Model saved to {model_save_path}")
     
@@ -687,10 +690,17 @@ def main():
             print("You can generate samples with: python preprocess_samples.py")
             args.preprocessed = False
     
-    # Set paths
+    # Set paths with clear window size identification
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    model_save_path = os.path.join(OUTPUT_DIR, f"voice_isolation_model_{timestamp}.pth")
-    plot_save_path = os.path.join(OUTPUT_DIR, f"training_history_{timestamp}.png")
+    model_type = "deep" if args.deep_model else "standard"
+    model_save_path = os.path.join(
+        OUTPUT_DIR, 
+        f"voice_isolation_{args.window_size}_{model_type}_{timestamp}.pth"
+    )
+    plot_save_path = os.path.join(
+        OUTPUT_DIR, 
+        f"training_history_{args.window_size}_{model_type}_{timestamp}.png"
+    )
     
     # Train model with all options
     model, history = train_model(

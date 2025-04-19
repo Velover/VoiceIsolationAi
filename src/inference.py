@@ -29,13 +29,29 @@ def load_model(model_path: str, device: torch.device) -> Tuple[VoiceIsolationMod
     # Load checkpoint
     checkpoint = torch.load(model_path, map_location=device)
     
-    # Create model and load state
-    model = VoiceIsolationModel(n_fft=checkpoint.get('n_fft', N_FFT))
+    # Get model type (deep or standard)
+    is_deep_model = checkpoint.get('deep_model', False)
+    
+    # Create appropriate model and load state
+    if is_deep_model:
+        from .model import VoiceIsolationModelDeep
+        model = VoiceIsolationModelDeep(n_fft=checkpoint.get('n_fft', N_FFT))
+    else:
+        from .model import VoiceIsolationModel
+        model = VoiceIsolationModel(n_fft=checkpoint.get('n_fft', N_FFT))
+        
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
     model.eval()
     
     window_size = checkpoint.get('window_size', 'medium')
+    
+    # Print model information for clarity
+    print(f"Model information:")
+    print(f"  - Window size: {window_size}")
+    print(f"  - Model type: {'Deep' if is_deep_model else 'Standard'}")
+    print(f"  - Created on: {checkpoint.get('creation_date', 'unknown')}")
+    print(f"  - Training samples: {checkpoint.get('training_samples', 'unknown')}")
     
     return model, window_size
 
@@ -43,7 +59,8 @@ def process_audio(
     input_path: str,
     output_path: str,
     model_path: str,
-    device: torch.device
+    device: torch.device,
+    verbose: bool = True
 ) -> None:
     """
     Process audio file to isolate voice using the trained model.
@@ -53,39 +70,48 @@ def process_audio(
         output_path: Path to save output audio
         model_path: Path to trained model
         device: Device to run inference on
+        verbose: Whether to print detailed progress
     """
     process_start = time.time()
-    print(f"=== VOICE ISOLATION PROCESSING ===")
-    print(f"Input: {input_path}")
-    print(f"Output: {output_path}")
-    print(f"Model: {model_path}")
-    print(f"Device: {device}")
+    if verbose:
+        print(f"=== VOICE ISOLATION PROCESSING ===")
+        print(f"Input: {input_path}")
+        print(f"Output: {output_path}")
+        print(f"Model: {model_path}")
+        print(f"Device: {device}")
     
     # Load model
-    print("\n[1/6] Loading model...", end="")
+    if verbose:
+        print("\n[1/6] Loading model...", end="")
     start = time.time()
     model, window_size = load_model(model_path, device)
     duration = time.time() - start
-    print(f" Done in {duration:.2f}s")
+    if verbose:
+        print(f" Done in {duration:.2f}s")
+        print(f"       Window size: {window_size} ({WINDOW_SIZES.get(window_size, 'unknown')}ms)")
     
     # Initialize preprocessor with use_gpu flag based on device
     use_gpu = device.type == 'cuda'
     preprocessor = AudioPreprocessor(window_size=window_size, use_gpu=use_gpu)
     
     # Load audio
-    print(f"[2/6] Loading audio file...", end="")
+    if verbose:
+        print(f"[2/6] Loading audio file...", end="")
     start = time.time()
     audio = preprocessor.load_audio(input_path)
     duration = time.time() - start
     duration_seconds = audio.shape[1] / SAMPLE_RATE
-    print(f" Done in {duration:.2f}s (Audio length: {duration_seconds:.2f}s)")
+    if verbose:
+        print(f" Done in {duration:.2f}s (Audio length: {duration_seconds:.2f}s)")
     
     # Compute STFT
-    print("[3/6] Computing STFT...", end="")
+    if verbose:
+        print("[3/6] Computing STFT...", end="")
     start = time.time()
     stft = preprocessor.compute_stft(audio)
     duration = time.time() - start
-    print(f" Done in {duration:.2f}s")
+    if verbose:
+        print(f" Done in {duration:.2f}s")
     
     # Get magnitude and phase
     magnitude = torch.abs(stft)
@@ -95,15 +121,17 @@ def process_audio(
     orig_shape = magnitude.shape
     
     # Standardize spectrogram for model input
-    print("[4/6] Processing with model...", end="")
+    if verbose:
+        print("[4/6] Processing with model...", end="")
     start = time.time()
     magnitude_std = preprocessor.standardize_spectrogram(magnitude)
     
     # Prepare input for model (add batch and channel dimensions)
     model_input = magnitude_std.unsqueeze(0).unsqueeze(0).to(device)
     
-    # Display model input shape
-    print(f"\n       Input shape: {model_input.shape}", end="")
+    # Display model input shape if verbose
+    if verbose:
+        print(f"\n       Input shape: {model_input.shape}", end="")
     
     # Generate mask with proper device handling for autocast
     with torch.no_grad():
@@ -113,7 +141,8 @@ def process_audio(
             mask = model(model_input).squeeze(0).squeeze(0).cpu()
     
     duration = time.time() - start
-    print(f"\r[4/6] Processing with model... Done in {duration:.2f}s" + " " * 40)
+    if verbose:
+        print(f"\r[4/6] Processing with model... Done in {duration:.2f}s" + " " * 40)
     
     # If spectrogram was padded, make sure to use only the relevant part of the mask
     if orig_shape[1] < SPEC_TIME_DIM:
@@ -126,17 +155,20 @@ def process_audio(
         mask = temp_mask
     
     # Apply mask to isolate voice
-    print("[5/6] Applying isolation mask...", end="")
+    if verbose:
+        print("[5/6] Applying isolation mask...", end="")
     start = time.time()
     isolated_magnitude = magnitude * mask
     duration = time.time() - start
-    print(f" Done in {duration:.2f}s")
+    if verbose:
+        print(f" Done in {duration:.2f}s")
     
     # Reconstruct complex STFT
     isolated_stft = isolated_magnitude * torch.exp(1j * phase)
     
     # Convert back to audio
-    print("[6/6] Converting back to audio...", end="")
+    if verbose:
+        print("[6/6] Converting back to audio...", end="")
     start = time.time()
     isolated_audio = torch.istft(
         isolated_stft,
@@ -154,13 +186,15 @@ def process_audio(
         SAMPLE_RATE
     )
     duration = time.time() - start
-    print(f" Done in {duration:.2f}s")
+    if verbose:
+        print(f" Done in {duration:.2f}s")
     
     total_time = time.time() - process_start
-    print(f"\n=== PROCESSING COMPLETE ===")
-    print(f"Total processing time: {total_time:.2f}s")
-    print(f"Processing ratio: {total_time/duration_seconds:.2f}x realtime")
-    print(f"Output saved to: {output_path}")
+    if verbose:
+        print(f"\n=== PROCESSING COMPLETE ===")
+        print(f"Total processing time: {total_time:.2f}s")
+        print(f"Processing ratio: {total_time/duration_seconds:.2f}x realtime")
+        print(f"Output saved to: {output_path}")
 
 def main():
     """Main function for inference"""

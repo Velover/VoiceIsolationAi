@@ -88,6 +88,69 @@ Training parameters:
 
 The trained model will be saved in the `OUTPUT` directory.
 
+### Testing with Mixed Audio Files
+
+Generate test audio files by mixing voice and noise from your dataset:
+
+```bash
+# Generate 5 test files by mixing voice and noise (20 seconds each)
+python main.py generate-test
+
+# Generate 10 test files with custom settings
+python main.py generate-test --num-files 10 --duration 15 --min-snr 0 --max-snr 15
+```
+
+These commands will:
+
+1. Create a TEST directory with subdirectories VOICE, NOISE, and MIXED
+2. Generate mixed audio files with controlled SNR levels
+3. Save the clean voice files for comparison
+
+You can then use these files to test your model:
+
+```bash
+# Process a test file with your trained model
+python main.py isolate --input TEST/MIXED/mixed_voice1_noise1_snr5.0_1.wav --model OUTPUT/your_model.pth
+```
+
+### Using Your Trained Model
+
+You can process individual files:
+
+```bash
+# Process a single file
+python main.py isolate --input TEST/MIXED/mixed_voice1_noise1_snr5.0_1.wav --model OUTPUT/your_model.pth
+```
+
+Or batch process all test files at once:
+
+```bash
+# Process all files in TEST/MIXED directory
+python main.py isolate-batch --model OUTPUT/your_model.pth
+
+# Process with multiple parallel workers (faster on multi-core systems)
+python main.py isolate-batch --model OUTPUT/your_model.pth --workers 4
+
+# Process files from a different directory
+python main.py isolate-batch --model OUTPUT/your_model.pth --input-dir MY_FILES --output-dir RESULTS
+```
+
+This will:
+
+1. Process all audio files in TEST/MIXED
+2. Save the isolated voice files to TEST/ISOLATED
+3. Show progress and timing information
+
+### Model Management
+
+List all available models in the `OUTPUT` directory:
+
+```bash
+python main.py list-models
+```
+
+This will display all trained models with their names and metadata.
+
 ### Troubleshooting
 
 - **"No voice/noise files found"**: Make sure you have audio files in the VOICE and NOISE directories
