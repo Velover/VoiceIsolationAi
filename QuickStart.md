@@ -37,20 +37,40 @@ A deep learning system for isolating a specific person's voice from background n
    python main.py preprocess
    ```
 
+### Preprocessing for Faster Training
+
+For maximum training speed, preprocess audio data:
+
+1. **Convert WAV files and create cached spectrograms**:
+
+   ```bash
+   python main.py preprocess --convert
+   ```
+
+2. **Generate training samples** (do this once, saves hours of training time):
+
+   ```bash
+   # Generate 1000 training samples using 8 CPU workers
+   python main.py generate-samples --samples 1000 --gpu --workers 8
+
+   # For maximum speed on multicore systems
+   python main.py generate-samples --samples 5000 --gpu --workers 12
+
+   # For lower memory systems
+   python main.py generate-samples --samples 2000 --workers 4
+   ```
+
 ### Training the Model
 
 ```bash
-# Train with cached data (fastest method, recommended)
+# FASTEST: Train with pre-generated samples (recommended after running generate-samples)
+python main.py train --preprocessed --gpu --mixed-precision --deep-model
+
+# Alternative: Train with cached spectrograms (no pre-generated samples)
 python main.py train --use-cache --gpu --mixed-precision --deep-model
 
-# Basic training with default parameters
+# Basic training with default parameters (slowest)
 python main.py train
-
-# Advanced training with custom parameters
-python main.py train --window-size medium --epochs 50 --batch-size 64
-
-# Maximum GPU utilization without preprocessing
-python main.py train --gpu --mixed-precision --deep-model
 ```
 
 Training parameters:
@@ -64,6 +84,7 @@ Training parameters:
 - `--auto-detect-samples`: Automatically determine optimal sample count based on GPU memory
 - `--deep-model`: Use deeper model architecture for maximizing GPU computational utilization
 - `--use-cache`: Use preprocessed cached data to dramatically speed up training
+- `--preprocessed`: Use pre-generated samples for maximum training speed (requires running generate-samples first)
 
 The trained model will be saved in the `OUTPUT` directory.
 
@@ -74,17 +95,20 @@ The trained model will be saved in the `OUTPUT` directory.
   - The VOICE directory should contain recordings of the target person
   - The NOISE directory should contain background noises and other people's voices
 
-// ...existing content...
+## Training Performance Tips
 
-```
+1. **For fastest training**:
 
-These changes will:
+   - First run: `python main.py generate-samples --samples 3000 --gpu --workers 8`
+   - Then: `python main.py train --preprocessed --gpu --mixed-precision --deep-model`
 
-1. Make the `CachedSpectrogramDataset` initialization more robust by initializing thread control attributes early
-2. Add checks to create empty directories if they don't exist
-3. Add more helpful error messages when no audio files are found
-4. Add a feature to create example audio files if directories are empty
-5. Update the QuickStart guide with troubleshooting information
+2. **If sample generation is slow**:
 
-The main issue was that either the NOISE directory was empty or didn't exist. With these changes, you'll get clearer error messages and have the option to create test examples.
-```
+   - Increase worker count with `--workers` (use fewer than your CPU core count)
+   - For high-end GPUs, use them for preprocessing with `--gpu`
+   - For low-memory systems, reduce worker count and generate fewer samples
+
+3. **If training is still slow**:
+   - Try reducing the number of samples using `--samples`
+   - Ensure you're using a GPU with `--gpu`
+   - Make sure you've run `generate-samples` first

@@ -84,6 +84,10 @@ def main():
                         help='Use deeper model for higher GPU utilization')
     train_parser.add_argument('--use-cache', action='store_true', default=False,
                         help='Use cached preprocessed data for faster training')
+    train_parser.add_argument('--preprocessed', action='store_true', default=False,
+                        help='Use pre-generated samples for maximum speed (fastest)')
+    train_parser.add_argument('--preprocessed-dir', default=None,
+                        help='Directory containing pre-generated samples')
     
     # Inference command
     inference_parser = subparsers.add_parser('isolate', help='Isolate voice in audio file')
@@ -101,6 +105,23 @@ def main():
                           help='Convert WAV files to more efficient format')
     preprocess_parser.add_argument('--create-examples', action='store_true',
                           help='Create example audio files if directories are empty')
+    preprocess_parser.add_argument('--samples', type=int, default=1000,
+                          help='Number of training samples to preprocess and save')
+    
+    # Generate Samples command
+    generate_parser = subparsers.add_parser('generate-samples', help='Generate and save training samples')
+    generate_parser.add_argument('--samples', type=int, default=1000,
+                        help='Number of samples to generate')
+    generate_parser.add_argument('--window-size', choices=['small', 'medium', 'large'], 
+                        default='medium', help='Window size for processing')
+    generate_parser.add_argument('--gpu', action='store_true', default=USE_GPU,
+                        help='Use GPU acceleration if available')
+    generate_parser.add_argument('--force', action='store_true',
+                        help='Force regeneration of existing samples')
+    generate_parser.add_argument('--workers', type=int, default=None,
+                        help='Number of worker processes (default: auto)')
+    generate_parser.add_argument('--output-dir', default=None,
+                        help='Directory to save preprocessed samples')
     
     # GPU Info command
     subparsers.add_parser('gpu-info', help='List available GPUs and their properties')
@@ -125,6 +146,10 @@ def main():
             sys.argv.append('--deep-model')
         if args.use_cache:
             sys.argv.append('--use-cache')
+        if args.preprocessed:
+            sys.argv.append('--preprocessed')
+        if args.preprocessed_dir:
+            sys.argv.extend(['--preprocessed-dir', args.preprocessed_dir])
             
         train_main()
     elif args.command == 'isolate':
@@ -149,7 +174,27 @@ def main():
             sys.argv.append('--convert')
         if args.create_examples:
             sys.argv.append('--create-examples')
+        if args.samples:
+            sys.argv.extend(['--samples', str(args.samples)])
         preprocess_main()
+    elif args.command == 'generate-samples':
+        # Import and run sample generation script
+        from preprocess_samples import main as generate_samples_main
+        # Set sys.argv to pass arguments
+        sys.argv = [sys.argv[0]]
+        if args.samples:
+            sys.argv.extend(['--samples', str(args.samples)])
+        if args.window_size:
+            sys.argv.extend(['--window-size', args.window_size])
+        if args.gpu:
+            sys.argv.append('--gpu')
+        if args.force:
+            sys.argv.append('--force')
+        if args.workers:
+            sys.argv.extend(['--workers', str(args.workers)])
+        if args.output_dir:
+            sys.argv.extend(['--output-dir', args.output_dir])
+        generate_samples_main()
     elif args.command == 'gpu-info':
         list_gpus()
     else:

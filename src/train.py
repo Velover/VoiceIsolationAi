@@ -67,254 +67,89 @@ if USE_GPU:
     # Optimize GPU settings
     optimize_for_gpu()
 
-class CachedSpectrogramDataset(Dataset):
-    """Dataset that uses cached spectrograms for faster loading"""
+class PreprocessedDataset(Dataset):
+    """Dataset that uses pre-generated samples for maximum speed"""
     
-    def __init__(self, voice_dir: str, noise_dir: str, 
-                 num_samples: int = 1000, transform=None, use_gpu: bool = USE_GPU,
-                 voice_cache_dir=None, noise_cache_dir=None):
+    def __init__(self, samples_dir: str, 
+                 num_samples: int = None, transform=None):
         """
-        Initialize dataset with cache support
+        Initialize dataset with pre-generated samples.
         
         Args:
-            voice_dir: Directory with voice audio files
-            noise_dir: Directory with noise audio files
-            num_samples: Number of samples to generate
+            samples_dir: Directory containing preprocessed sample files
+            num_samples: Number of samples to use (None = use all available)
             transform: Optional transforms to apply
-            use_gpu: Whether to use GPU acceleration
-            voice_cache_dir: Directory with cached voice spectrograms
-            noise_cache_dir: Directory with cached noise spectrograms
         """
-        # Initialize thread control attributes first to avoid errors in __del__
-        self.preload_lock = threading.Lock()
-        self.stop_preloading = threading.Event()
-        self.preload_thread = None
-        self.preload_queue = None
-        
+        self.samples_dir = samples_dir
         self.transform = transform
-        self.num_samples = num_samples
-        self.use_gpu = use_gpu and USE_GPU
-        self.device = torch.device(f"cuda:{GPU_DEVICE}" if self.use_gpu else "cpu")
         
-        # Setup cache paths
-        self.voice_cache_dir = voice_cache_dir or os.path.join(CACHE_DIR, 'voice')
-        self.noise_cache_dir = noise_cache_dir or os.path.join(CACHE_DIR, 'noise')
+        # Get list of all sample files
+        self.sample_files = [
+            os.path.join(samples_dir, f) for f in os.listdir(samples_dir)
+            if f.endswith('.pt')
+        ]
         
-        # Make sure directories exist
-        os.makedirs(self.voice_cache_dir, exist_ok=True)
-        os.makedirs(self.noise_cache_dir, exist_ok=True)
-        os.makedirs(voice_dir, exist_ok=True)
-        os.makedirs(noise_dir, exist_ok=True)
+        # Limit to requested number if specified
+        if num_samples is not None and num_samples > 0 and num_samples < len(self.sample_files):
+            self.sample_files = self.sample_files[:num_samples]
         
-        # Check if cache exists
-        self.voice_cache_available = os.path.exists(self.voice_cache_dir) and len(os.listdir(self.voice_cache_dir)) > 0
-        self.noise_cache_available = os.path.exists(self.noise_cache_dir) and len(os.listdir(self.noise_cache_dir)) > 0
+        print(f"Using {len(self.sample_files)} pre-generated samples from {samples_dir}")
         
-        # Get lists of files
-        if self.voice_cache_available:
-            self.voice_files = [os.path.join(self.voice_cache_dir, f) for f in os.listdir(self.voice_cache_dir) if f.endswith('.pt')]
-            print(f"Using {len(self.voice_files)} cached voice spectrograms")
-        else:
-            self.voice_files = get_audio_files(voice_dir)
-            print(f"Using {len(self.voice_files)} original voice audio files")
-            
-        if self.noise_cache_available:
-            self.noise_files = [os.path.join(self.noise_cache_dir, f) for f in os.listdir(self.noise_cache_dir) if f.endswith('.pt')]
-            print(f"Using {len(self.noise_files)} cached noise spectrograms")
-        else:
-            self.noise_files = get_audio_files(noise_dir)
-            print(f"Using {len(self.noise_files)} original noise audio files")
-        
-        # Verify files exist and provide helpful error messages
-        if not self.voice_files:
-            print("=" * 80)
-            print(f"ERROR: No voice files found in {voice_dir} or cache")
-            print("Please add some voice audio files (.mp3, .wav, or .flac) to the VOICE directory.")
-            print("For example:")
-            print("  - Add .mp3, .wav, or .flac files of the target person speaking alone")
-            print("  - Make sure the files are readable and not corrupted")
-            print("=" * 80)
-            raise ValueError(f"No voice files found in {voice_dir} or cache")
-            
-        if not self.noise_files:
-            print("=" * 80)
-            print(f"ERROR: No noise files found in {noise_dir} or cache")
-            print("Please add some noise/background audio files (.mp3, .wav, or .flac) to the NOISE directory.")
-            print("For example:")
-            print("  - Add recordings of other people speaking (not the target person)")
-            print("  - Add background noise recordings")
-            print("  - Add any sounds that typically interfere with the target voice")
-            print("=" * 80)
-            raise ValueError(f"No noise files found in {noise_dir} or cache")
-        
-        # Initialize preprocessor for non-cached data
-        if not (self.voice_cache_available and self.noise_cache_available):
-            self.preprocessor = AudioPreprocessor(use_gpu=use_gpu)
-        
-        # Create sample indices
-        self.indices = list(range(num_samples))
-        
-        # Preloaded sample cache
-        self.preloaded_samples = {}
-        
-        # Setup background loading thread - increase preload size for better batch preparation
-        self.preload_queue = queue.Queue(maxsize=max(PRELOAD_SAMPLES, 3 * BATCH_SIZE))
-        self.preload_thread = threading.Thread(target=self._preload_samples_worker)
-        self.preload_thread.daemon = True
-        self.preload_thread.start()
-        
-        # Create multiple background threads for better CPU core utilization
-        self.worker_threads = []
-        num_workers = min(4, os.cpu_count() - 1)  # Use more worker threads but leave one CPU core free
-        for i in range(num_workers):
-            worker = threading.Thread(target=self._preload_samples_worker)
-            worker.daemon = True
-            worker.start()
-            self.worker_threads.append(worker)
-        
-        # Estimate time for sample creation
-        self._estimate_creation_time()
-    
-    def _estimate_creation_time(self):
-        print("\n=== PREPARING SAMPLE DATASET ===")
-        sample_size = min(5, self.num_samples)
-        
-        progress_bar = tqdm(range(sample_size), desc="Creating test samples", unit="sample")
-        start_time = time.time()
-        for i in progress_bar:
-            self._create_sample()
-        
-        avg_time = (time.time() - start_time) / sample_size
-        print(f"Sample creation speed: {avg_time:.2f}s per sample")
-        total_est_time = avg_time * self.num_samples / (len(self.worker_threads) + 1)
-        print(f"Estimated total preparation time: {total_est_time:.1f}s with {len(self.worker_threads) + 1} workers")
-        print(f"Using {'cached' if self.voice_cache_available else 'raw'} data")
-        
-        if self.use_gpu:
-            print(f"GPU acceleration: ENABLED ✓")
-        else:
-            print(f"GPU acceleration: DISABLED ✗")
-    
-    def _load_cached_spectrogram(self, file_path):
-        """Load a preprocessed spectrogram from cache"""
-        return torch.load(file_path, map_location='cpu')
-    
-    def _create_sample(self):
-        """Create a single training sample from cached or raw data"""
-        # 80% mix with noise, 20% just voice
-        use_noise = random.random() < 0.8
-        mix_ratio = random.uniform(0.3, 0.7) if use_noise else 1.0
-        
-        # Select random files
-        voice_path = random.choice(self.voice_files)
-        noise_path = random.choice(self.noise_files) if use_noise else None
-        
-        try:
-            # Check if using cached spectrograms
-            if self.voice_cache_available and (not use_noise or self.noise_cache_available):
-                # Load voice spectrogram
-                voice_spec = self._load_cached_spectrogram(voice_path)
-                
-                if use_noise:
-                    # Load noise spectrogram
-                    noise_spec = self._load_cached_spectrogram(noise_path)
-                    
-                    # Adjust lengths to match
-                    min_time_frames = min(voice_spec.shape[1], noise_spec.shape[1])
-                    voice_spec = voice_spec[:, :min_time_frames]
-                    noise_spec = noise_spec[:, :min_time_frames]
-                    
-                    # Mix spectrograms directly (approx - not as accurate as time domain mixing)
-                    mixed_spec = voice_spec * mix_ratio + noise_spec * (1 - mix_ratio)
-                else:
-                    mixed_spec = voice_spec
-                
-                # Create mask
-                epsilon = 1e-10
-                mask = (voice_spec / (mixed_spec + epsilon)) > 0.5
-                mask = mask.float()
-                
-            else:
-                # Fallback to original method
-                return self.preprocessor.create_training_example(
-                    voice_path, noise_path, mix_ratio
-                )
-            
-            # Standardize
-            if hasattr(self, 'preprocessor'):
-                mixed_spec = self.preprocessor.standardize_spectrogram(mixed_spec)
-                mask = self.preprocessor.standardize_spectrogram(mask)
-                
-            return mixed_spec, mask
-            
-        except Exception as e:
-            print(f"Error creating sample: {e}")
-            # Try another sample
-            return self._create_sample()
-    
-    def _preload_samples_worker(self):
-        """Background worker to preload samples"""
-        while not self.stop_preloading.is_set():
-            try:
-                # If we don't have enough preloaded samples, create more
-                if self.preload_queue.qsize() < PRELOAD_SAMPLES:
-                    sample = self._create_sample()
-                    self.preload_queue.put(sample, block=False)
-                else:
-                    time.sleep(0.1)  # Don't spin if queue is full
-            except queue.Full:
-                time.sleep(0.1)  # Queue is full, wait a bit
-            except Exception as e:
-                print(f"Error in preload worker: {e}")
-                time.sleep(0.5)  # Wait a bit after errors
+        # Sample loading stats for diagnostics
+        self.load_times = []
     
     def __len__(self):
-        return self.num_samples
+        return len(self.sample_files)
     
     def __getitem__(self, idx):
-        """Get a sample from the preloaded queue if available, otherwise create one"""
+        """Get a pre-generated sample from disk"""
+        start_time = time.time()
         try:
-            # First try to get a preloaded sample
-            try:
-                mixed_spec, mask = self.preload_queue.get(block=False)
-            except queue.Empty:
-                # If none are ready, create one on demand
-                mixed_spec, mask = self._create_sample()
+            # Load sample from disk
+            sample_path = self.sample_files[idx]
+            sample_data = torch.load(sample_path, map_location='cpu')
+            
+            mixed_spec = sample_data['mixed']
+            mask = sample_data['mask']
             
             # Apply transformations if any
             if self.transform:
                 mixed_spec = self.transform(mixed_spec)
                 mask = self.transform(mask)
             
-            # Add channel dimension
-            mixed_spec = mixed_spec.unsqueeze(0)
-            mask = mask.unsqueeze(0)
+            # Add channel dimension if needed
+            if mixed_spec.dim() == 2:
+                mixed_spec = mixed_spec.unsqueeze(0)
+            if mask.dim() == 2:
+                mask = mask.unsqueeze(0)
             
-            # IMPORTANT: Move tensors to CPU before returning
-            if mixed_spec.device.type != 'cpu':
-                mixed_spec = mixed_spec.cpu()
-            if mask.device.type != 'cpu':
-                mask = mask.cpu()
+            # Track loading times for performance monitoring
+            load_time = time.time() - start_time
+            self.load_times.append(load_time)
+            
+            # Only keep the most recent times
+            if len(self.load_times) > 100:
+                self.load_times = self.load_times[-100:]
                 
             return {
                 'mixed': mixed_spec,
                 'mask': mask
             }
         except Exception as e:
-            print(f"Error in __getitem__: {e}")
-            return self.__getitem__(random.randint(0, len(self) - 1))
+            print(f"Error loading sample {idx}: {e}")
+            # Try another sample on error
+            return self.__getitem__((idx + 1) % len(self))
     
-    def __del__(self):
-        """Cleanup resources"""
-        if hasattr(self, 'stop_preloading') and self.stop_preloading is not None:
-            self.stop_preloading.set()
-        if hasattr(self, 'preload_thread') and self.preload_thread is not None and self.preload_thread.is_alive():
-            self.preload_thread.join(timeout=1.0)
-        # Clean up worker threads
-        if hasattr(self, 'worker_threads'):
-            for thread in self.worker_threads:
-                if thread.is_alive():
-                    thread.join(timeout=0.5)
+    def get_loading_stats(self):
+        """Get statistics about sample loading performance"""
+        if not self.load_times:
+            return {"avg_time": 0, "min_time": 0, "max_time": 0}
+        
+        return {
+            "avg_time": sum(self.load_times) / len(self.load_times),
+            "min_time": min(self.load_times),
+            "max_time": max(self.load_times)
+        }
 
 def train_model(
     window_size: str = 'medium',
@@ -327,7 +162,9 @@ def train_model(
     use_mixed_precision: bool = MIXED_PRECISION,
     auto_detect_samples: bool = AUTO_DETECT_SAMPLES,
     use_deep_model: bool = False,
-    use_cache: bool = USE_CACHED_DATA
+    use_cache: bool = USE_CACHED_DATA,
+    use_preprocessed: bool = False,  # New flag for pre-generated samples
+    preprocessed_dir: Optional[str] = None  # Path to pre-generated samples
 ) -> Tuple[nn.Module, Dict]:
     """
     Train the voice isolation model.
@@ -344,6 +181,8 @@ def train_model(
         auto_detect_samples: Auto-detect optimal sample count
         use_deep_model: Use deeper model for higher GPU utilization
         use_cache: Use cached preprocessed data
+        use_preprocessed: Whether to use pre-generated samples
+        preprocessed_dir: Directory with pre-generated samples
         
     Returns:
         Tuple of (trained model, training history)
@@ -424,29 +263,45 @@ def train_model(
     
     print(f"\n=== CREATING DATASET ({num_samples} SAMPLES) ===")
     
-    # Create the appropriate dataset (cached or on-the-fly)
-    if use_cache:
-        print("Using cached dataset with background workers for faster loading")
-        dataset = CachedSpectrogramDataset(
-            voice_dir=VOICE_DIR,
-            noise_dir=NOISE_DIR,
-            num_samples=num_samples,
-            use_gpu=use_gpu
-        )
-        # When using CachedSpectrogramDataset, we must use num_workers=0
-        # because thread locks and queues can't be pickled for multiprocessing
-        actual_workers = 0
-        print("Note: Using 0 dataloader workers with cached dataset (required for thread safety)")
-    else:
-        dataset = SpectrogramDataset(
-            voice_dir=VOICE_DIR,
-            noise_dir=NOISE_DIR,
-            preprocessor=preprocessor,
-            num_samples=num_samples,
-            use_gpu=use_gpu
-        )
-        # Use configured number of workers for non-cached dataset
-        actual_workers = DATALOADER_WORKERS
+    # Create the appropriate dataset based on what's available and requested
+    if use_preprocessed and preprocessed_dir:
+        # Use pre-generated samples (fastest option)
+        if not os.path.exists(preprocessed_dir):
+            print(f"Warning: Preprocessed samples directory {preprocessed_dir} not found")
+            print("Falling back to standard dataset")
+            use_preprocessed = False
+        else:
+            print(f"Using pre-generated samples from {preprocessed_dir} for maximum speed")
+            dataset = PreprocessedDataset(
+                samples_dir=preprocessed_dir,
+                num_samples=num_samples
+            )
+            actual_workers = min(4, DATALOADER_WORKERS)  # Can use multiple workers safely
+            print(f"Using {actual_workers} dataloader workers with pre-generated samples")
+    
+    if not use_preprocessed:
+        if use_cache:
+            print("Using cached dataset with background workers for faster loading")
+            dataset = CachedSpectrogramDataset(
+                voice_dir=VOICE_DIR,
+                noise_dir=NOISE_DIR,
+                num_samples=num_samples,
+                use_gpu=use_gpu
+            )
+            # When using CachedSpectrogramDataset, we must use num_workers=0
+            # because thread locks and queues can't be pickled for multiprocessing
+            actual_workers = 0
+            print("Note: Using 0 dataloader workers with cached dataset (required for thread safety)")
+        else:
+            dataset = SpectrogramDataset(
+                voice_dir=VOICE_DIR,
+                noise_dir=NOISE_DIR,
+                preprocessor=preprocessor,
+                num_samples=num_samples,
+                use_gpu=use_gpu
+            )
+            # Use configured number of workers for non-cached dataset
+            actual_workers = DATALOADER_WORKERS
     
     # Split into train and validation sets
     val_size = int(VALIDATION_SPLIT * len(dataset))
@@ -814,8 +669,23 @@ def main():
                         help='Use deeper model for higher GPU utilization')
     parser.add_argument('--use-cache', action='store_true', default=USE_CACHED_DATA,
                         help='Use cached preprocessed data for faster loading')
+    parser.add_argument('--preprocessed', action='store_true', default=False,
+                        help='Use pre-generated samples for maximum speed')
+    parser.add_argument('--preprocessed-dir', default=None,
+                        help='Directory containing pre-generated samples')
     
     args = parser.parse_args()
+    
+    # Auto-detect preprocessed samples directory if not specified
+    if args.preprocessed and args.preprocessed_dir is None:
+        default_samples_dir = os.path.join(CACHE_DIR, f'samples_{args.window_size}')
+        if os.path.exists(default_samples_dir):
+            args.preprocessed_dir = default_samples_dir
+            print(f"Auto-detected samples directory: {args.preprocessed_dir}")
+        else:
+            print(f"No preprocessed samples found at {default_samples_dir}")
+            print("You can generate samples with: python preprocess_samples.py")
+            args.preprocessed = False
     
     # Set paths
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -833,7 +703,9 @@ def main():
         use_mixed_precision=args.mixed_precision,
         auto_detect_samples=args.auto_detect_samples,
         use_deep_model=args.deep_model,
-        use_cache=args.use_cache
+        use_cache=args.use_cache,
+        use_preprocessed=args.preprocessed,
+        preprocessed_dir=args.preprocessed_dir
     )
     
     # Plot training history

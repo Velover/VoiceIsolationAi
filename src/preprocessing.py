@@ -269,6 +269,105 @@ class AudioPreprocessor:
         
         return audio.unsqueeze(0)  # Add channel dimension
 
+    def preload_files(self, file_paths: List[str], max_files: int = 10) -> Dict[str, torch.Tensor]:
+        """
+        Preload multiple audio files for faster batch processing
+        
+        Args:
+            file_paths: List of audio file paths to preload
+            max_files: Maximum number of files to load (to avoid memory issues)
+            
+        Returns:
+            Dictionary mapping file paths to audio tensors
+        """
+        preloaded = {}
+        files_to_load = file_paths[:max_files]
+        
+        for file_path in files_to_load:
+            try:
+                preloaded[file_path] = self.load_audio(file_path)
+            except Exception as e:
+                print(f"Error preloading {file_path}: {e}")
+                
+        return preloaded
+    
+    def batch_compute_spectrograms(self, audio_list: List[torch.Tensor]) -> List[torch.Tensor]:
+        """
+        Compute spectrograms for a batch of audio tensors
+        
+        Args:
+            audio_list: List of audio tensors
+            
+        Returns:
+            List of spectrogram tensors
+        """
+        results = []
+        
+        # Process in batches if we're using GPU for better throughput
+        if self.use_gpu:
+            # Process in smaller batches to avoid CUDA OOM
+            batch_size = 4
+            for i in range(0, len(audio_list), batch_size):
+                batch = audio_list[i:i+batch_size]
+                
+                # Process batch
+                with torch.cuda.stream(torch.cuda.Stream()):
+                    batch_results = [self.compute_spectrogram(audio) for audio in batch]
+                    # Move results to CPU to free GPU memory
+                    batch_results = [spec.cpu() for spec in batch_results]
+                    results.extend(batch_results)
+                    
+                # Clear CUDA cache
+                torch.cuda.empty_cache()
+        else:
+            # Process individually for CPU
+            results = [self.compute_spectrogram(audio) for audio in audio_list]
+        
+        return results
+    
+    def create_training_example_fast(self, voice: torch.Tensor, noise: Optional[torch.Tensor] = None, 
+                                mix_ratio: float = 0.5) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Create a training example using pre-loaded tensors (faster version)
+        
+        Args:
+            voice: Voice audio tensor
+            noise: Noise audio tensor (optional)
+            mix_ratio: Ratio of voice to noise (0-1)
+            
+        Returns:
+            Tuple of (mixed spectrogram, voice mask)
+        """
+        # Mix audio
+        if noise is not None:
+            # Adjust lengths to match
+            min_length = min(voice.shape[1], noise.shape[1])
+            voice = voice[:, :min_length]
+            noise = noise[:, :min_length]
+            
+            # Mix voice and noise - ensure same device
+            if voice.device != noise.device:
+                noise = noise.to(voice.device)
+                
+            mixed = voice * mix_ratio + noise * (1 - mix_ratio)
+        else:
+            mixed = voice
+        
+        # Compute spectrograms
+        voice_spec = self.compute_spectrogram(voice)
+        mixed_spec = self.compute_spectrogram(mixed)
+        
+        # Create mask
+        epsilon = 1e-10
+        mask = (voice_spec / (mixed_spec + epsilon)) > 0.5
+        mask = mask.float()
+        
+        # Standardize
+        mixed_spec = self.standardize_spectrogram(mixed_spec)
+        mask = self.standardize_spectrogram(mask)
+        
+        return mixed_spec, mask
+
 def get_audio_files(directory: str) -> List[str]:
     """
     Get all supported audio files from a directory.
