@@ -1,0 +1,55 @@
+# Python bytecode files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.env/
+.venv/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Project specific
+# Folders with audio data
+VOICE/
+NOISE/
+
+# Output directory with trained models
+OUTPUT/
+*.pth
+
+# Generated audio files
+*.mp3
+*.wav
+*.webm
+
+# Exception for test files if needed
+# !test_samples/*.mp3
+# !test_samples/*.wav
+# !test_samples/*.webm
+
+# Log files
+*.log
+
+# Temporary files
+tmp/
+temp/
