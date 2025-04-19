@@ -28,15 +28,18 @@ def train_model(window_size):
     model = UNet().to(DEVICE)
     print(f"Training on {DEVICE}")
     
-    # Check if preprocessed data exists, if not prepare it
-    if not os.path.exists(PREPROCESSED_VOICE) or not os.listdir(PREPROCESSED_VOICE) or \
-       not os.path.exists(PREPROCESSED_NOISE) or not os.listdir(PREPROCESSED_NOISE):
-        print("Preprocessed data not found. Preparing training data...")
-        prepare_training_data(remove_silence_flag=True)
+    # Check if training data exists
+    if not os.path.exists(VOICE_FOR_TRAINING) or not os.listdir(VOICE_FOR_TRAINING) or \
+       not os.path.exists(NOISE_FOR_TRAINING) or not os.listdir(NOISE_FOR_TRAINING):
+        print("WARNING: Training data folders are empty!")
+        print(f"Please add audio files to {VOICE_FOR_TRAINING} and {NOISE_FOR_TRAINING}")
+        print("You can use preprocessed files from PREPROCESSED_VOICE and PREPROCESSED_NOISE")
+        print("Or use your own curated files")
+        return
     
     # Create dataset and dataloader
     dataset = VoiceSeparationDataset(
-        PREPROCESSED_VOICE, PREPROCESSED_NOISE, 
+        VOICE_FOR_TRAINING, NOISE_FOR_TRAINING, 
         window_size_ms=window_size_ms,
         window_samples=window_samples,
         hop_length=hop_length,
@@ -137,6 +140,8 @@ def main():
     if args.prepare_only:
         print("Preparing training data...")
         prepare_training_data(remove_silence_flag=True)
+        print(f"\nNOTE: Please manually copy files from PREPROCESSED_VOICE to {VOICE_FOR_TRAINING}")
+        print(f"and from PREPROCESSED_NOISE to {NOISE_FOR_TRAINING} that you want to use for training")
         return
     
     if args.all:

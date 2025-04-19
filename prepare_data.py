@@ -182,6 +182,11 @@ def prepare_training_data(remove_silence_flag=True, generate_samples=False):
     print(f"Processed {len(noise_files)} noise files -> {PREPROCESSED_NOISE}")
     if generate_samples:
         print(f"Sample mixtures saved to {SAMPLES_DIR}")
+    
+    print("\nNEXT STEPS:")
+    print(f"1. Review the processed files in {PREPROCESSED_VOICE} and {PREPROCESSED_NOISE}")
+    print(f"2. Copy files you want to use for training to {VOICE_FOR_TRAINING} and {NOISE_FOR_TRAINING}")
+    print("3. Run training with: python train.py")
 
 def main():
     parser = argparse.ArgumentParser(description='Prepare audio data for voice isolation training')

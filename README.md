@@ -120,10 +120,27 @@ python process.py --input "recordings/noisy_conversation.mp3" --output "clean/is
 
 ## Data Organization
 
-The project expects two folders:
+The project uses the following folder structure:
 
-- `VOICE`: Contains audio files of the target person's voice
-- `NOISE`: Contains audio files of other people's voices and background noise
+- `VOICE`: Contains original audio files of the target person's voice
+- `NOISE`: Contains original audio files of other people's voices and background noise
+- `PREPROCESSED_VOICE`: Contains processed voice files with silence removed
+- `PREPROCESSED_NOISE`: Contains processed noise files with silence removed
+- `VOICE_FOR_TRAINING`: Contains files that will be used for training (manually selected)
+- `NOISE_FOR_TRAINING`: Contains files that will be used for training (manually selected)
+- `SAMPLES`: Contains generated sample mixtures for testing
+- `OUTPUT`: Contains trained models and checkpoints
+
+### Training Workflow
+
+1. Add raw audio files to `VOICE` and `NOISE` folders
+2. Run preprocessing: `python prepare_data.py`
+3. Manually copy files from `PREPROCESSED_VOICE` to `VOICE_FOR_TRAINING` and from `PREPROCESSED_NOISE` to `NOISE_FOR_TRAINING`
+   - This allows you to select which files to use for training
+   - You can also add your own custom files directly to these folders
+4. Run training: `python train.py`
+
+This workflow gives you more control over which files are used for training, allowing for more experimentation and targeted training sets.
 
 Supported audio formats: mp3, wav, webm (all sample rates are automatically converted)
 

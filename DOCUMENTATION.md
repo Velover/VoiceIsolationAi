@@ -63,6 +63,8 @@ pip install torch torchaudio librosa numpy tqdm soundfile
 ├── NOISE/            # Other voices and noise (raw)
 ├── PREPROCESSED_VOICE/ # Processed voice files with silence removed
 ├── PREPROCESSED_NOISE/ # Processed noise files with silence removed
+├── VOICE_FOR_TRAINING/ # Files manually selected for training
+├── NOISE_FOR_TRAINING/ # Files manually selected for training
 ├── SAMPLES/          # Generated sample mixtures for testing
 └── OUTPUT/           # Trained models and outputs
 ```
@@ -241,6 +243,21 @@ The system includes a dedicated preprocessing script that:
 2. Normalizes audio formats and sample rates
 3. Can generate sample mixtures with various SNR levels for testing
 
+### Folder Structure and Workflow
+
+The system uses separate folders for different stages of data processing:
+
+- `VOICE` and `NOISE`: Original raw audio files
+- `PREPROCESSED_VOICE` and `PREPROCESSED_NOISE`: Processed files with silence removed
+- `VOICE_FOR_TRAINING` and `NOISE_FOR_TRAINING`: Files that will be used for training
+
+This separation gives you more control over your training data. After preprocessing, you can manually select which files to use for training by copying them to the training folders. This allows you to:
+
+- Exclude problematic files
+- Create specialized training sets
+- Experiment with different combinations of files
+- Add your own custom files directly to the training folders
+
 ### Running Preprocessing
 
 ```bash
@@ -257,11 +274,10 @@ python prepare_data.py --generate-samples
 python prepare_data.py --keep-silence --generate-samples
 ```
 
-This creates:
+After preprocessing, you need to manually copy files to the training folders:
 
-- `PREPROCESSED_VOICE`: Contains processed voice files with silence removed
-- `PREPROCESSED_NOISE`: Contains processed noise files with silence removed
-- `SAMPLES`: Contains sample mixtures of voice and noise at different SNR levels (if --generate-samples is used)
+1. Review the processed files in `PREPROCESSED_VOICE` and `PREPROCESSED_NOISE`
+2. Copy the files you want to use for training to `VOICE_FOR_TRAINING` and `NOISE_FOR_TRAINING`
 
 ### Silence Removal
 
@@ -291,10 +307,17 @@ This significantly improves the quality of training data by ensuring the model o
    - Supported formats: mp3, wav, webm
 
 3. **Preprocess the data**:
+
    ```bash
    python prepare_data.py
    ```
-   This creates the preprocessed folders that will be used for training.
+
+   This creates preprocessed folders with silence removed.
+
+4. **Select files for training**:
+   - Review the files in `PREPROCESSED_VOICE` and `PREPROCESSED_NOISE`
+   - Manually copy files you want to use for training to `VOICE_FOR_TRAINING` and `NOISE_FOR_TRAINING`
+   - You can also add your own custom files directly to these folders
 
 ### Start Training
 
