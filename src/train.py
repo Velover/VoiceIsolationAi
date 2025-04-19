@@ -32,7 +32,16 @@ if USE_GPU:
     
     # Limit GPU memory usage if needed
     if GPU_MEMORY_FRACTION < 1.0:
-        torch.cuda.set_per_process_memory_fraction(GPU_MEMORY_FRACTION, GPU_DEVICE)
+        try:
+            # Check if device exists before setting memory fraction
+            if GPU_DEVICE < torch.cuda.device_count():
+                torch.cuda.set_per_process_memory_fraction(GPU_MEMORY_FRACTION, GPU_DEVICE)
+            else:
+                print(f"⚠️ GPU device {GPU_DEVICE} not found. Using default device 0.")
+                torch.cuda.set_per_process_memory_fraction(GPU_MEMORY_FRACTION, 0)
+        except RuntimeError as e:
+            print(f"⚠️ Could not set GPU memory fraction: {e}")
+            print("Continuing without memory limits.")
 
 class SpectrogramDataset(Dataset):
     """Dataset for spectrogram and masks"""
@@ -167,11 +176,11 @@ def train_model(
     Returns:
         Tuple of (trained model, training history)
     """
-    # Set device for training
-    device = torch.device(f"cuda:{GPU_DEVICE}" if use_gpu and USE_GPU else "cpu")
-    print(f"Training on device: {device}")
-    
-    if device.type == 'cuda':
+    # Better GPU detection and messaging
+    if torch.cuda.is_available() and use_gpu:
+        device = torch.device(f"cuda:{GPU_DEVICE}")
+        print(f"✅ GPU acceleration enabled")
+        
         # Print GPU info
         gpu_name = torch.cuda.get_device_name(GPU_DEVICE)
         gpu_mem = torch.cuda.get_device_properties(GPU_DEVICE).total_memory / 1024**3
@@ -179,6 +188,13 @@ def train_model(
         
         # Clear GPU cache
         torch.cuda.empty_cache()
+    else:
+        if not torch.cuda.is_available() and use_gpu:
+            print("❌ GPU requested but no CUDA-compatible GPU detected!")
+            print("⚠️ Falling back to CPU...")
+        device = torch.device("cpu")
+    
+    print(f"Training on device: {device}")
     
     # Initialize preprocessor with GPU support
     preprocessor = AudioPreprocessor(window_size=window_size, use_gpu=use_gpu)
@@ -222,8 +238,8 @@ def train_model(
     # Move model to GPU
     model.to(device)
     
-    # Initialize scaler for mixed precision training
-    scaler = torch.cuda.amp.GradScaler(enabled=use_mixed_precision and device.type == 'cuda')
+    # Initialize scaler for mixed precision training with correct PyTorch 2.6.0 API
+    scaler = torch.amp.GradScaler(enabled=use_mixed_precision and device.type == 'cuda')
     
     # Training history
     history = {
@@ -253,10 +269,11 @@ def train_model(
             mixed_spec = batch['mixed'].to(device)
             target_mask = batch['mask'].to(device)
             
-            # Forward pass with mixed precision
+            # Forward pass with mixed precision - updated API
             optimizer.zero_grad()
             
-            with torch.cuda.amp.autocast(enabled=use_mixed_precision and device.type == 'cuda'):
+            # Correct autocast usage for PyTorch 2.6.0
+            with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision and device.type == 'cuda', dtype=torch.float16):
                 pred_mask = model(mixed_spec)
                 loss = loss_fn(pred_mask, target_mask)
             
@@ -286,8 +303,8 @@ def train_model(
                 mixed_spec = batch['mixed'].to(device)
                 target_mask = batch['mask'].to(device)
                 
-                # Forward pass with mixed precision
-                with torch.cuda.amp.autocast(enabled=use_mixed_precision and device.type == 'cuda'):
+                # Correct autocast usage for PyTorch 2.6.0
+                with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision and device.type == 'cuda', dtype=torch.float16):
                     pred_mask = model(mixed_spec)
                     loss = loss_fn(pred_mask, target_mask)
                 

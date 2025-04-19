@@ -15,7 +15,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # GPU configurations
 USE_GPU = torch.cuda.is_available()
-GPU_DEVICE = 1  # Use the first GPU (change if you have multiple GPUs)
+GPU_DEVICE = 0
 MIXED_PRECISION = True  # Use mixed precision training (FP16) for faster computation
 CUDNN_BENCHMARK = True  # Set to True for fixed-size inputs for better performance
 GPU_MEMORY_FRACTION = 0.8  # Use 80% of GPU memory to avoid OOM errors

@@ -149,8 +149,9 @@ class AudioPreprocessor:
         Returns:
             Tuple of (mixed spectrogram, voice mask)
         """
-        # Move all operations to GPU for faster processing
-        with torch.cuda.amp.autocast(enabled=self.use_gpu):
+        # Correct autocast usage for PyTorch 2.6.0
+        device_type = 'cuda' if self.use_gpu else 'cpu'
+        with torch.amp.autocast(device_type=device_type, enabled=self.use_gpu, dtype=torch.float16):
             # Load voice
             voice = self.load_audio(voice_path)
             

@@ -57,8 +57,9 @@ def process_audio(
     print("Loading model...")
     model, window_size = load_model(model_path, device)
     
-    # Initialize preprocessor
-    preprocessor = AudioPreprocessor(window_size=window_size)
+    # Initialize preprocessor with use_gpu flag based on device
+    use_gpu = device.type == 'cuda'
+    preprocessor = AudioPreprocessor(window_size=window_size, use_gpu=use_gpu)
     
     # Load audio
     print(f"Loading audio file: {input_path}")
@@ -82,10 +83,13 @@ def process_audio(
     # Prepare input for model (add batch and channel dimensions)
     model_input = magnitude_std.unsqueeze(0).unsqueeze(0).to(device)
     
-    # Generate mask
+    # Generate mask with proper device handling for autocast
     with torch.no_grad():
         print("Generating isolation mask...")
-        mask = model(model_input).squeeze(0).squeeze(0).cpu()
+        # Correct autocast usage for PyTorch 2.6.0
+        device_type = 'cuda' if device.type == 'cuda' else 'cpu'
+        with torch.amp.autocast(device_type=device_type, enabled=device.type == 'cuda', dtype=torch.float16):
+            mask = model(model_input).squeeze(0).squeeze(0).cpu()
     
     # If spectrogram was padded, make sure to use only the relevant part of the mask
     if orig_shape[1] < SPEC_TIME_DIM:

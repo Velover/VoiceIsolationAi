@@ -1,10 +1,38 @@
 import os
 import argparse
 import sys
+import torch
+
+# Add GPU environment setup
+from gpu_setup import setup_cuda_for_win_nvidia
+
+# Attempt to setup CUDA environment first
+setup_result = setup_cuda_for_win_nvidia()
 
 from src.train import main as train_main
 from src.inference import main as inference_main
 from src.config import OUTPUT_DIR, USE_GPU, MIXED_PRECISION
+
+def list_gpus():
+    """List all available GPUs and their properties"""
+    if not torch.cuda.is_available():
+        print("No CUDA-compatible GPUs detected.")
+        print("\nIMPORTANT: If you have an NVIDIA GPU, but PyTorch cannot see it:")
+        print("Run the following command to reinstall PyTorch with CUDA support:")
+        print("pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118")
+        return
+
+    print(f"CUDA is available with {torch.cuda.device_count()} devices:")
+    for i in range(torch.cuda.device_count()):
+        try:
+            properties = torch.cuda.get_device_properties(i)
+            print(f"  Device {i}: {properties.name}")
+            print(f"    - Total memory: {properties.total_memory / 1024**3:.2f} GB")
+            print(f"    - CUDA Capability: {properties.major}.{properties.minor}")
+        except Exception as e:
+            print(f"  Device {i}: Error getting properties - {e}")
+    
+    print(f"Current device: {torch.cuda.current_device()}")
 
 def main():
     parser = argparse.ArgumentParser(description='Voice Isolation AI')
@@ -33,6 +61,9 @@ def main():
     inference_parser.add_argument('--gpu', action='store_true', default=USE_GPU,
                         help='Use GPU acceleration if available')
     
+    # GPU Info command
+    subparsers.add_parser('gpu-info', help='List available GPUs and their properties')
+    
     args = parser.parse_args()
     
     if args.command == 'train':
@@ -60,6 +91,8 @@ def main():
             sys.argv.append('--gpu')
             
         inference_main()
+    elif args.command == 'gpu-info':
+        list_gpus()
     else:
         parser.print_help()
 

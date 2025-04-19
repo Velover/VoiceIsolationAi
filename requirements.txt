@@ -1,7 +1,11 @@
-torch>=1.9.0
-torchaudio>=0.9.0
-numpy>=1.20.0
-matplotlib>=3.4.0
-librosa>=0.8.0
-scipy>=1.7.0
-tqdm>=4.62.0  # For progress bars
+# PyTorch with CUDA support - using a correct format
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch
+torchaudio
+
+# Other dependencies
+numpy
+matplotlib
+librosa
+scipy
+tqdm  # For progress bars
