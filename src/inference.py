@@ -8,7 +8,7 @@ from pathlib import Path
 from tqdm import tqdm
 import time
 
-from .config import OUTPUT_DIR, N_FFT, HOP_LENGTH, SAMPLE_RATE, SPEC_TIME_DIM
+from .config import OUTPUT_DIR, N_FFT, HOP_LENGTH, SAMPLE_RATE, SPEC_TIME_DIM, WINDOW_SIZES
 from .preprocessing import AudioPreprocessor
 from .model import VoiceIsolationModel
 
@@ -158,6 +158,12 @@ def process_audio(
     if verbose:
         print("[5/6] Applying isolation mask...", end="")
     start = time.time()
+    
+    # Move everything to CPU before operations to ensure consistent device
+    magnitude = magnitude.cpu()
+    phase = phase.cpu()
+    mask = mask.cpu()
+    
     isolated_magnitude = magnitude * mask
     duration = time.time() - start
     if verbose:
@@ -170,11 +176,15 @@ def process_audio(
     if verbose:
         print("[6/6] Converting back to audio...", end="")
     start = time.time()
+    
+    # Ensure window is on the same device as the STFT
+    hann_window = torch.hann_window(N_FFT).to(isolated_stft.device)
+    
     isolated_audio = torch.istft(
         isolated_stft,
         n_fft=N_FFT,
         hop_length=HOP_LENGTH,
-        window=torch.hann_window(N_FFT)
+        window=hann_window
     )
     isolated_audio = isolated_audio.unsqueeze(0)  # Add channel dimension
     
