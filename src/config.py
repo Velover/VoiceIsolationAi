@@ -29,6 +29,9 @@ BATCH_SIZE = 32
 LEARNING_RATE = 0.001
 EPOCHS = 50
 
+# Fixed spectrogram time dimension for consistent batch processing
+SPEC_TIME_DIM = 256  # Fixed time dimension for spectrograms
+
 # Training configurations
 VALIDATION_SPLIT = 0.2
 RANDOM_SEED = 42

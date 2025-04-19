@@ -6,7 +6,10 @@ import random
 from pathlib import Path
 from typing import Tuple, List, Dict, Optional
 
-from .config import VOICE_DIR, NOISE_DIR, SAMPLE_RATE, N_FFT, HOP_LENGTH, SUPPORTED_FORMATS, WINDOW_SIZES
+from .config import (
+    SAMPLE_RATE, N_FFT, HOP_LENGTH, 
+    SUPPORTED_FORMATS, WINDOW_SIZES, SPEC_TIME_DIM
+)
 
 class AudioPreprocessor:
     """
@@ -88,6 +91,36 @@ class AudioPreprocessor:
         stft = self.compute_stft(audio)
         return torch.abs(stft)
     
+    def standardize_spectrogram(self, spectrogram: torch.Tensor, time_dim: int = SPEC_TIME_DIM) -> torch.Tensor:
+        """
+        Standardize spectrogram to have a fixed time dimension by padding or cropping.
+        
+        Args:
+            spectrogram: Input spectrogram tensor [frequency_bins, time_frames]
+            time_dim: Target time dimension
+            
+        Returns:
+            Standardized spectrogram with shape [frequency_bins, time_dim]
+        """
+        freq_dim, spec_time = spectrogram.shape
+        
+        # If already the right size, return as is
+        if spec_time == time_dim:
+            return spectrogram
+        
+        # Create a new tensor filled with zeros
+        standardized = torch.zeros((freq_dim, time_dim), dtype=spectrogram.dtype, 
+                                   device=spectrogram.device)
+        
+        if spec_time > time_dim:
+            # Crop if too long
+            standardized = spectrogram[:, :time_dim]
+        else:
+            # Pad with zeros if too short
+            standardized[:, :spec_time] = spectrogram
+        
+        return standardized
+    
     def create_training_example(self, voice_path: str, noise_path: Optional[str] = None, 
                               mix_ratio: float = 0.5) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -129,6 +162,10 @@ class AudioPreprocessor:
         epsilon = 1e-10  # Small value to avoid division by zero
         mask = (voice_spec / (mixed_spec + epsilon)) > 0.5
         mask = mask.float()
+        
+        # Standardize dimensions for batch processing
+        mixed_spec = self.standardize_spectrogram(mixed_spec)
+        mask = self.standardize_spectrogram(mask)
         
         return mixed_spec, mask
     

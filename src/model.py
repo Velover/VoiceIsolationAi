@@ -16,6 +16,7 @@ class VoiceIsolationModel(nn.Module):
         super(VoiceIsolationModel, self).__init__()
         
         # Input: [batch_size, 1, n_fft//2 + 1, time_frames]
+        self.freq_bins = n_fft // 2 + 1
         
         # Encoder
         self.encoder = nn.Sequential(
@@ -64,6 +65,9 @@ class VoiceIsolationModel(nn.Module):
         Returns:
             Predicted mask with same dimensions as input
         """
+        # Store original dimensions
+        batch_size, channels, freq_bins, time_frames = x.shape
+        
         # Reshape input if needed
         if x.dim() == 3:
             x = x.unsqueeze(1)  # Add channel dimension
@@ -73,6 +77,10 @@ class VoiceIsolationModel(nn.Module):
         
         # Decoder
         mask = self.decoder(encoded)
+        
+        # Ensure the output has the correct frequency dimension
+        if mask.shape[2] != freq_bins:
+            mask = F.interpolate(mask, size=(freq_bins, time_frames), mode='bilinear', align_corners=False)
         
         return mask
 
@@ -97,6 +105,13 @@ class MaskedLoss(nn.Module):
         Returns:
             Loss value
         """
+        # Ensure matching dimensions before computing loss
+        if pred_mask.shape != target_mask.shape:
+            target_freq_bins = target_mask.shape[2]
+            time_frames = target_mask.shape[3]
+            pred_mask = F.interpolate(pred_mask, size=(target_freq_bins, time_frames), 
+                                      mode='bilinear', align_corners=False)
+        
         # Basic mask prediction loss
         mask_loss = self.mse(pred_mask, target_mask)
         

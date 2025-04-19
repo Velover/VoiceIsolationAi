@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 import numpy as np
 from pathlib import Path
 
-from .config import OUTPUT_DIR, N_FFT, HOP_LENGTH, SAMPLE_RATE
+from .config import OUTPUT_DIR, N_FFT, HOP_LENGTH, SAMPLE_RATE, SPEC_TIME_DIM
 from .preprocessing import AudioPreprocessor
 from .model import VoiceIsolationModel
 
@@ -68,12 +68,28 @@ def process_audio(
     magnitude = torch.abs(stft)
     phase = torch.angle(stft)
     
+    # Store original dimensions
+    orig_shape = magnitude.shape
+    
+    # Standardize spectrogram for model input
+    magnitude_std = preprocessor.standardize_spectrogram(magnitude)
+    
     # Prepare input for model (add batch and channel dimensions)
-    model_input = magnitude.unsqueeze(0).unsqueeze(0).to(device)
+    model_input = magnitude_std.unsqueeze(0).unsqueeze(0).to(device)
     
     # Generate mask
     with torch.no_grad():
         mask = model(model_input).squeeze(0).squeeze(0).cpu()
+    
+    # If spectrogram was padded, make sure to use only the relevant part of the mask
+    if orig_shape[1] < SPEC_TIME_DIM:
+        mask = mask[:, :orig_shape[1]]
+    else:
+        # In case the original was longer (should not happen with standardized processing)
+        # Pad the mask with zeros
+        temp_mask = torch.zeros(orig_shape, dtype=mask.dtype)
+        temp_mask[:, :mask.shape[1]] = mask[:, :orig_shape[1]]
+        mask = temp_mask
     
     # Apply mask to isolate voice
     isolated_magnitude = magnitude * mask
