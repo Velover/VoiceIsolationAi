@@ -8,25 +8,32 @@ from typing import Tuple, List, Dict, Optional
 
 from .config import (
     SAMPLE_RATE, N_FFT, HOP_LENGTH, 
-    SUPPORTED_FORMATS, WINDOW_SIZES, SPEC_TIME_DIM
+    SUPPORTED_FORMATS, WINDOW_SIZES, SPEC_TIME_DIM,
+    USE_GPU, GPU_DEVICE
 )
 
 class AudioPreprocessor:
     """
     Handles audio data preprocessing for voice isolation model
     """
-    def __init__(self, window_size: str = 'medium'):
+    def __init__(self, window_size: str = 'medium', use_gpu: bool = USE_GPU):
         """
         Initialize the audio preprocessor.
         
         Args:
             window_size: Size of the window for processing ('small', 'medium', 'large')
+            use_gpu: Whether to use GPU acceleration if available
         """
         if window_size not in WINDOW_SIZES:
             raise ValueError(f"Window size must be one of {list(WINDOW_SIZES.keys())}")
         
         self.window_size_ms = WINDOW_SIZES[window_size]
         self.window_size_samples = int(SAMPLE_RATE * self.window_size_ms / 1000)
+        self.use_gpu = use_gpu and USE_GPU
+        self.device = torch.device(f"cuda:{GPU_DEVICE}" if self.use_gpu else "cpu")
+        
+        # Move the Hann window to GPU for faster STFT computation
+        self.window = torch.hann_window(N_FFT).to(self.device)
         
     def load_audio(self, file_path: str) -> torch.Tensor:
         """
@@ -58,6 +65,10 @@ class AudioPreprocessor:
             resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=SAMPLE_RATE)
             audio = resampler(audio)
         
+        # Move tensor to GPU if enabled
+        if self.use_gpu:
+            audio = audio.to(self.device)
+        
         return audio
     
     def compute_stft(self, audio: torch.Tensor) -> torch.Tensor:
@@ -70,11 +81,15 @@ class AudioPreprocessor:
         Returns:
             Complex STFT tensor [frequency_bins, time_frames]
         """
+        # Make sure audio is on the correct device
+        if audio.device != self.device:
+            audio = audio.to(self.device)
+            
         return torch.stft(
             audio[0],
             n_fft=N_FFT, 
             hop_length=HOP_LENGTH,
-            window=torch.hann_window(N_FFT),
+            window=self.window,
             return_complex=True
         )
     
@@ -134,38 +149,40 @@ class AudioPreprocessor:
         Returns:
             Tuple of (mixed spectrogram, voice mask)
         """
-        # Load voice
-        voice = self.load_audio(voice_path)
-        
-        # Load noise if provided
-        if noise_path:
-            noise = self.load_audio(noise_path)
+        # Move all operations to GPU for faster processing
+        with torch.cuda.amp.autocast(enabled=self.use_gpu):
+            # Load voice
+            voice = self.load_audio(voice_path)
             
-            # Adjust lengths to match
-            min_length = min(voice.shape[1], noise.shape[1])
-            voice = voice[:, :min_length]
-            noise = noise[:, :min_length]
+            # Load noise if provided
+            if noise_path:
+                noise = self.load_audio(noise_path)
+                
+                # Adjust lengths to match
+                min_length = min(voice.shape[1], noise.shape[1])
+                voice = voice[:, :min_length]
+                noise = noise[:, :min_length]
+                
+                # Mix voice and noise
+                noise = noise * (1 - mix_ratio)
+                voice = voice * mix_ratio
+                mixed = voice + noise
+            else:
+                mixed = voice
             
-            # Mix voice and noise
-            noise = noise * (1 - mix_ratio)
-            voice = voice * mix_ratio
-            mixed = voice + noise
-        else:
-            mixed = voice
-        
-        # Compute spectrograms
-        voice_spec = self.compute_spectrogram(voice)
-        mixed_spec = self.compute_spectrogram(mixed)
-        
-        # Create mask (1 where voice is present, 0 elsewhere)
-        # Using a simple threshold for mask creation
-        epsilon = 1e-10  # Small value to avoid division by zero
-        mask = (voice_spec / (mixed_spec + epsilon)) > 0.5
-        mask = mask.float()
-        
-        # Standardize dimensions for batch processing
-        mixed_spec = self.standardize_spectrogram(mixed_spec)
-        mask = self.standardize_spectrogram(mask)
+            # Compute spectrograms
+            voice_spec = self.compute_spectrogram(voice)
+            mixed_spec = self.compute_spectrogram(mixed)
+            
+            # Create mask (1 where voice is present, 0 elsewhere)
+            # Using a simple threshold for mask creation
+            epsilon = 1e-10  # Small value to avoid division by zero
+            mask = (voice_spec / (mixed_spec + epsilon)) > 0.5
+            mask = mask.float()
+            
+            # Standardize dimensions for batch processing
+            mixed_spec = self.standardize_spectrogram(mixed_spec)
+            mask = self.standardize_spectrogram(mask)
         
         return mixed_spec, mask
     

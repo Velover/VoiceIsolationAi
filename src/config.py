@@ -1,4 +1,5 @@
 import os
+import torch
 from pathlib import Path
 
 # Base paths
@@ -11,6 +12,13 @@ OUTPUT_DIR = os.path.join(BASE_DIR, 'OUTPUT')
 os.makedirs(VOICE_DIR, exist_ok=True)
 os.makedirs(NOISE_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# GPU configurations
+USE_GPU = torch.cuda.is_available()
+GPU_DEVICE = 1  # Use the first GPU (change if you have multiple GPUs)
+MIXED_PRECISION = True  # Use mixed precision training (FP16) for faster computation
+CUDNN_BENCHMARK = True  # Set to True for fixed-size inputs for better performance
+GPU_MEMORY_FRACTION = 0.8  # Use 80% of GPU memory to avoid OOM errors
 
 # Audio processing configurations
 SAMPLE_RATE = 16000  # Hz

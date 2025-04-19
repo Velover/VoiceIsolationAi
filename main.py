@@ -4,7 +4,7 @@ import sys
 
 from src.train import main as train_main
 from src.inference import main as inference_main
-from src.config import OUTPUT_DIR
+from src.config import OUTPUT_DIR, USE_GPU, MIXED_PRECISION
 
 def main():
     parser = argparse.ArgumentParser(description='Voice Isolation AI')
@@ -20,12 +20,18 @@ def main():
                         help='Number of training epochs')
     train_parser.add_argument('--samples', type=int, default=2000, 
                         help='Number of training samples to generate')
+    train_parser.add_argument('--gpu', action='store_true', default=USE_GPU,
+                        help='Use GPU acceleration if available')
+    train_parser.add_argument('--mixed-precision', action='store_true', default=MIXED_PRECISION,
+                        help='Use mixed precision training for faster computation')
     
     # Inference command
     inference_parser = subparsers.add_parser('isolate', help='Isolate voice in audio file')
     inference_parser.add_argument('--input', required=True, help='Path to input audio file')
     inference_parser.add_argument('--output', help='Path to save output audio')
     inference_parser.add_argument('--model', required=True, help='Path to trained model')
+    inference_parser.add_argument('--gpu', action='store_true', default=USE_GPU,
+                        help='Use GPU acceleration if available')
     
     args = parser.parse_args()
     
@@ -36,6 +42,12 @@ def main():
             '--epochs', str(args.epochs),
             '--samples', str(args.samples)
         ]
+        
+        if args.gpu:
+            sys.argv.append('--gpu')
+        if args.mixed_precision:
+            sys.argv.append('--mixed-precision')
+            
         train_main()
     elif args.command == 'isolate':
         sys.argv = [sys.argv[0]] + [
@@ -44,6 +56,9 @@ def main():
         ]
         if args.output:
             sys.argv += ['--output', args.output]
+        if args.gpu:
+            sys.argv.append('--gpu')
+            
         inference_main()
     else:
         parser.print_help()
