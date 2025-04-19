@@ -37,7 +37,7 @@ CACHE_MEMORY_LIMIT = 2048  # Memory limit for cache in MB
 BACKGROUND_WORKERS = max(1, os.cpu_count() - 1)  # Use all CPU cores except one
 
 # Audio processing configurations
-SAMPLE_RATE = 16000  # Hz
+SAMPLE_RATE = 32000  # Hz - this is a good value for voice
 WINDOW_SIZES = {
     'small': 30,    # 30ms window
     'medium': 500,  # 500ms window
@@ -45,10 +45,10 @@ WINDOW_SIZES = {
 }
 DEFAULT_WINDOW_SIZE = 'medium'  # Default window size choice
 
-# Model configurations
-N_FFT = 512  # Number of frequency bins for FFT
-HOP_LENGTH = 128  # Hop length for STFT
-N_MELS = 64  # Number of Mel bands
+# Model configurations - ENHANCED FFT SETTINGS
+N_FFT = 2048  # Increased from 512 for better frequency resolution
+HOP_LENGTH = 512  # Increased from 128 for better processing efficiency
+N_MELS = 128  # Increased from 64 for more detailed spectral features
 LEARNING_RATE = 0.005
 EPOCHS = 50
 

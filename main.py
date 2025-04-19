@@ -96,6 +96,8 @@ def main():
     inference_parser.add_argument('--model', required=True, help='Path to trained model')
     inference_parser.add_argument('--gpu', action='store_true', default=USE_GPU,
                         help='Use GPU acceleration if available')
+    inference_parser.add_argument('--debug', action='store_true',
+                        help='Generate additional debug files')
     
     # Preprocess command
     preprocess_parser = subparsers.add_parser('preprocess', help='Preprocess audio files for faster training')
@@ -122,6 +124,12 @@ def main():
                         help='Number of worker processes (default: auto)')
     generate_parser.add_argument('--output-dir', default=None,
                         help='Directory to save preprocessed samples')
+    generate_parser.add_argument('--use-cache', action='store_true', default=False,
+                        help='Use cached spectrograms for faster sample generation')
+    generate_parser.add_argument('--voice-cache-dir', default=None,
+                        help='Directory with cached voice spectrograms')
+    generate_parser.add_argument('--noise-cache-dir', default=None,
+                        help='Directory with cached noise spectrograms')
     
     # GPU Info command
     subparsers.add_parser('gpu-info', help='List available GPUs and their properties')
@@ -146,6 +154,7 @@ def main():
     batch_parser.add_argument('--output-dir', default='TEST/ISOLATED', help='Directory to save isolated files')
     batch_parser.add_argument('--gpu', action='store_true', default=True, help='Use GPU acceleration')
     batch_parser.add_argument('--workers', type=int, default=1, help='Number of parallel workers (1=sequential)')
+    batch_parser.add_argument('--debug', action='store_true', help='Generate additional debug files')
     
     args = parser.parse_args()
     
@@ -182,6 +191,8 @@ def main():
             sys.argv += ['--output', args.output]
         if args.gpu:
             sys.argv.append('--gpu')
+        if args.debug:
+            sys.argv.append('--debug')
             
         inference_main()
     elif args.command == 'preprocess':
@@ -215,6 +226,12 @@ def main():
             sys.argv.extend(['--workers', str(args.workers)])
         if args.output_dir:
             sys.argv.extend(['--output-dir', args.output_dir])
+        if args.use_cache:
+            sys.argv.append('--use-cache')
+        if args.voice_cache_dir:
+            sys.argv.extend(['--voice-cache-dir', args.voice_cache_dir])
+        if args.noise_cache_dir:
+            sys.argv.extend(['--noise-cache-dir', args.noise_cache_dir])
         generate_samples_main()
     elif args.command == 'gpu-info':
         list_gpus()
@@ -240,7 +257,8 @@ def main():
             output_dir=args.output_dir,
             model_path=args.model,
             use_gpu=args.gpu,
-            num_workers=args.workers
+            num_workers=args.workers,
+            debug=args.debug  # Pass debug flag
         )
     else:
         parser.print_help()

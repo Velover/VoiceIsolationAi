@@ -61,7 +61,8 @@ def process_audio(
     output_path: str,
     model_path: str,
     device: torch.device,
-    verbose: bool = True
+    verbose: bool = True,
+    debug: bool = False  # New parameter to control debug file generation
 ) -> None:
     """
     Process audio file to isolate voice using the trained model.
@@ -72,6 +73,7 @@ def process_audio(
         model_path: Path to trained model
         device: Device to run inference on
         verbose: Whether to print detailed progress
+        debug: Whether to generate additional debug files
     """
     process_start = time.time()
     if verbose:
@@ -338,9 +340,10 @@ def process_audio(
         SAMPLE_RATE
     )
     
-    # Save debug audio files
-    if verbose:
-        print(f"[6/6] Creating comparison files...")
+    # Save debug audio files only if debug flag is set
+    if debug:
+        if verbose:
+            print(f"[6/6] Creating debug files...")
         
         # Save a pure version (no mixing)
         pure_path = os.path.splitext(output_path)[0] + "_pure.wav"
@@ -355,9 +358,10 @@ def process_audio(
         orig_path = os.path.splitext(output_path)[0] + "_original.wav"
         torchaudio.save(orig_path, original_audio.cpu(), SAMPLE_RATE)
         
-        print(f"       Pure isolated audio saved to: {pure_path}")
-        print(f"       70/30 mixed audio saved to: {mixed_path}")
-        print(f"       Original audio saved to: {orig_path}")
+        if verbose:
+            print(f"       Pure isolated audio saved to: {pure_path}")
+            print(f"       70/30 mixed audio saved to: {mixed_path}")
+            print(f"       Original audio saved to: {orig_path}")
         
         # Save a visual mask debug report if matplotlib is available
         try:
@@ -380,9 +384,13 @@ def process_audio(
             plt.savefig(mask_debug_path)
             plt.close()
             
-            print(f"       Mask debug visualization saved to: {mask_debug_path}")
+            if verbose:
+                print(f"       Mask debug visualization saved to: {mask_debug_path}")
         except ImportError:
-            print("       Note: matplotlib not available for mask visualization")
+            if verbose:
+                print("       Note: matplotlib not available for mask visualization")
+    elif verbose:
+        print(f"[6/6] Debug files disabled. Use --debug flag to generate additional audio files.")
     
     # Display important note about model effectiveness
     if sum(mask_means)/len(mask_means) > 0.9:
@@ -407,6 +415,7 @@ def main():
     parser.add_argument('--input', required=True, help='Path to input audio file')
     parser.add_argument('--output', help='Path to save output audio')
     parser.add_argument('--model', required=True, help='Path to trained model')
+    parser.add_argument('--debug', action='store_true', help='Generate additional debug files')
     
     args = parser.parse_args()
     
@@ -425,7 +434,8 @@ def main():
         input_path=args.input,
         output_path=args.output,
         model_path=args.model,
-        device=device
+        device=device,
+        debug=args.debug  # Pass debug flag
     )
 
 if __name__ == "__main__":

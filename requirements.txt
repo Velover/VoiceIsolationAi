@@ -9,3 +9,4 @@ matplotlib
 librosa
 scipy
 tqdm  # For progress bars
+tabulate

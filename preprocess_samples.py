@@ -3,306 +3,424 @@ Preprocess and cache training samples to speed up training
 """
 import os
 import torch
-import torch.multiprocessing as mp
+import numpy as np
+import random
 import argparse
-import time
 from pathlib import Path
 from tqdm import tqdm
-import random
-import itertools
-import numpy as np
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+import time
 
 from src.preprocessing import AudioPreprocessor, get_audio_files
 from src.config import (
-    VOICE_DIR, NOISE_DIR, CACHE_DIR, SAMPLE_RATE,
-    USE_GPU, BATCH_SIZE, N_FFT
+    VOICE_DIR, NOISE_DIR, CACHE_DIR, SAMPLE_RATE, 
+    WINDOW_SIZES, DEFAULT_WINDOW_SIZE, SPEC_TIME_DIM
 )
 
-def process_batch(args):
+def create_sample(sample_id, voice_files, noise_files, output_dir, window_size='medium', use_gpu=False):
     """
-    Process a batch of samples (designed for multiprocessing)
+    Create and save a single training sample.
     
     Args:
-        args: Tuple of (batch_idx, num_samples, voice_files, noise_files, 
-                       output_dir, window_size, use_gpu)
-                       
+        sample_id: Sample identifier
+        voice_files: List of voice audio files
+        noise_files: List of noise audio files
+        output_dir: Directory to save samples
+        window_size: Processing window size
+        use_gpu: Whether to use GPU acceleration
+        
     Returns:
-        Number of successfully processed samples
+        Tuple of (success, message)
     """
-    batch_idx, batch_size, voice_files, noise_files, output_dir, window_size, use_gpu = args
-    
-    # Create local preprocessor for this process
-    preprocessor = AudioPreprocessor(window_size=window_size, use_gpu=use_gpu)
-    
-    # Determine sample range for this batch
-    start_idx = batch_idx * batch_size
-    
-    # Pre-load voice and noise files for this batch to avoid repeated loading
-    preloaded_voice = {}
-    preloaded_noise = {}
-    
-    # Track which files we need for this batch
-    batch_voice_files = random.sample(voice_files, min(5, len(voice_files)))
-    batch_noise_files = random.sample(noise_files, min(10, len(noise_files)))
-    
-    # Preload audio
-    for voice_path in batch_voice_files:
-        try:
-            preloaded_voice[voice_path] = preprocessor.load_audio(voice_path)
-        except Exception as e:
-            print(f"Error loading {voice_path}: {e}")
-    
-    for noise_path in batch_noise_files:
-        try:
-            preloaded_noise[noise_path] = preprocessor.load_audio(noise_path)
-        except Exception as e:
-            print(f"Error loading {noise_path}: {e}")
-    
-    # Create GPU tensor batch containers if using GPU
-    if use_gpu and torch.cuda.is_available():
-        # Use a fixed batch size of 4-8 for GPU processing to avoid OOM
-        gpu_batch_size = 4
-        mixed_batch = []
-        mask_batch = []
-    
-    # Process samples
-    samples_created = 0
-    for i in range(batch_size):
-        try:
-            # 80% mix with noise, 20% just voice
-            use_noise = random.random() < 0.8
-            mix_ratio = random.uniform(0.3, 0.7) if use_noise else 1.0
-            
-            # Select random files
-            voice_path = random.choice(batch_voice_files)
-            noise_path = random.choice(batch_noise_files) if use_noise else None
-            
-            # Use preloaded audio when available
-            voice = preloaded_voice.get(voice_path)
-            if voice is None:
-                continue
-                
-            noise = preloaded_noise.get(noise_path) if noise_path else None
-            if use_noise and noise is None:
-                continue
-            
-            # Process on GPU in batches when possible
-            if use_gpu and torch.cuda.is_available():
-                # Create and add to batch
-                if noise is not None:
-                    # Adjust lengths to match
-                    min_length = min(voice.shape[1], noise.shape[1])
-                    voice_part = voice[:, :min_length]
-                    noise_part = noise[:, :min_length]
-                    
-                    mixed = voice_part * mix_ratio + noise_part * (1 - mix_ratio)
-                else:
-                    mixed = voice
-                
-                # Compute spectrograms
-                voice_spec = preprocessor.compute_spectrogram(voice if noise is None else voice_part)
-                mixed_spec = preprocessor.compute_spectrogram(mixed)
-                
-                # Create mask
-                epsilon = 1e-10
-                mask = (voice_spec / (mixed_spec + epsilon)) > 0.5
-                mask = mask.float()
-                
-                # Standardize
-                mixed_spec = preprocessor.standardize_spectrogram(mixed_spec)
-                mask = preprocessor.standardize_spectrogram(mask)
-                
-                # Move to CPU for saving
-                mixed_spec = mixed_spec.cpu()
-                mask = mask.cpu()
-                
-                # Save sample
-                sample_idx = start_idx + samples_created
-                sample_path = os.path.join(output_dir, f"sample_{sample_idx:06d}.pt")
-                torch.save({
-                    'mixed': mixed_spec,
-                    'mask': mask
-                }, sample_path)
-                
-                samples_created += 1
-            else:
-                # CPU processing
-                mixed_spec, mask = preprocessor.create_training_example(
-                    voice_path, noise_path, mix_ratio
-                )
-                
-                # Save to disk with unique filename
-                sample_idx = start_idx + samples_created
-                sample_path = os.path.join(output_dir, f"sample_{sample_idx:06d}.pt")
-                
-                # Move tensors to CPU before saving if needed
-                if mixed_spec.device.type != 'cpu':
-                    mixed_spec = mixed_spec.cpu()
-                if mask.device.type != 'cpu':
-                    mask = mask.cpu()
-                
-                # Save as tensor dictionary
-                torch.save({
-                    'mixed': mixed_spec,
-                    'mask': mask
-                }, sample_path)
-                
-                samples_created += 1
-                
-        except Exception as e:
-            print(f"Error creating sample in batch {batch_idx}: {e}")
-    
-    # Clean up explicitly to free memory
-    del preprocessor
-    del preloaded_voice
-    del preloaded_noise
-    if use_gpu and torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    
-    return samples_created
+    try:
+        # Initialize preprocessor with given window size
+        preprocessor = AudioPreprocessor(window_size=window_size, use_gpu=use_gpu)
+        
+        # Select random files
+        voice_path = random.choice(voice_files)
+        noise_path = random.choice(noise_files)
+        
+        # Random mix ratio
+        mix_ratio = random.uniform(0.3, 0.7)
+        
+        # Create training example
+        mixed_spec, mask = preprocessor.create_training_example(
+            voice_path, noise_path, mix_ratio=mix_ratio
+        )
+        
+        # Move tensors to CPU if they're on GPU
+        if mixed_spec.device.type == 'cuda':
+            mixed_spec = mixed_spec.cpu()
+            mask = mask.cpu()
+        
+        # Save sample to disk
+        output_path = os.path.join(output_dir, f"sample_{sample_id:05d}.pt")
+        torch.save(
+            {
+                'mixed': mixed_spec,
+                'mask': mask,
+                'voice_path': voice_path,
+                'noise_path': noise_path,
+                'mix_ratio': mix_ratio
+            },
+            output_path
+        )
+        
+        return (True, f"Created sample {sample_id}")
+    except Exception as e:
+        return (False, f"Error creating sample {sample_id}: {e}")
 
-def generate_training_samples(
-    num_samples: int,
-    window_size: str = 'medium',
-    use_gpu: bool = USE_GPU,
-    output_dir: str = None,
-    force_regenerate: bool = False,
-    num_workers: int = None
-):
+def generate_samples(num_samples=1000, window_size=DEFAULT_WINDOW_SIZE, 
+                   output_dir=None, workers=None, use_gpu=False, force=False):
     """
-    Generate and cache training samples for faster model training.
+    Generate training samples and save them to disk.
     
     Args:
         num_samples: Number of samples to generate
         window_size: Processing window size
-        use_gpu: Whether to use GPU for preprocessing
-        output_dir: Directory to save samples (defaults to CACHE_DIR/samples)
-        force_regenerate: Whether to force regeneration of existing samples
-        num_workers: Number of parallel workers (default: CPU count minus 1)
+        output_dir: Directory to save samples
+        workers: Number of worker processes (None = auto-detect)
+        use_gpu: Whether to use GPU acceleration
+        force: Whether to force regeneration of existing samples
     """
-    # Setup directories
+    # Set up output directory
     if output_dir is None:
-        output_dir = os.path.join(CACHE_DIR, f'samples_{window_size}')
-    
+        output_dir = os.path.join(CACHE_DIR, f"samples_{window_size}")
     os.makedirs(output_dir, exist_ok=True)
     
-    # Check if samples already exist
-    existing_samples = [f for f in os.listdir(output_dir) if f.endswith('.pt')]
-    if len(existing_samples) >= num_samples and not force_regenerate:
-        print(f"Found {len(existing_samples)} existing samples in {output_dir}")
-        print("Use --force to regenerate these samples")
-        return output_dir
-    
-    # Get voice and noise files
+    # Get audio files
     voice_files = get_audio_files(VOICE_DIR)
     noise_files = get_audio_files(NOISE_DIR)
     
     if not voice_files:
-        raise ValueError(f"No voice files found in {VOICE_DIR}")
+        print(f"No voice files found in {VOICE_DIR}")
+        return
+    
     if not noise_files:
-        raise ValueError(f"No noise files found in {NOISE_DIR}")
+        print(f"No noise files found in {NOISE_DIR}")
+        return
     
     print(f"Found {len(voice_files)} voice files and {len(noise_files)} noise files")
     
-    # Determine optimal number of workers
-    if num_workers is None:
-        # Use all CPUs except one
-        num_workers = max(1, mp.cpu_count() - 1)
-    
-    # Limit number of workers based on files
-    num_workers = min(num_workers, len(voice_files), len(noise_files))
-    
-    print(f"Initializing preprocessor (window_size={window_size}, use_gpu={use_gpu})")
-    print(f"Using {num_workers} worker processes")
-    
-    # Clear any existing samples if forcing regeneration
-    if force_regenerate and existing_samples:
-        print(f"Removing {len(existing_samples)} existing samples...")
-        for sample_file in existing_samples:
-            os.remove(os.path.join(output_dir, sample_file))
-    
-    # Prepare for multiprocessing
-    batch_size = min(50, max(10, num_samples // (num_workers * 2)))
-    total_batches = (num_samples + batch_size - 1) // batch_size
-    
-    print(f"Generating {num_samples} training samples in {output_dir}...")
-    print(f"Processing in {total_batches} batches with {batch_size} samples per batch")
-    
-    # Start timing
-    start_time = time.time()
-    
-    # Set multiprocessing start method - 'spawn' is more compatible across platforms
-    mp.set_start_method('spawn', force=True)
-    
-    # Prepare batch arguments
-    batch_args = []
-    for batch_idx in range(total_batches):
-        # Adjust final batch size if needed
-        current_batch_size = min(batch_size, num_samples - batch_idx * batch_size)
-        if current_batch_size <= 0:
-            break
-            
-        batch_args.append(
-            (batch_idx, current_batch_size, voice_files, noise_files, 
-             output_dir, window_size, use_gpu)
-        )
-    
-    # Process batches in parallel
-    samples_created = 0
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # Submit all tasks
-        futures = [executor.submit(process_batch, args) for args in batch_args]
+    # Check if samples already exist
+    existing_samples = [f for f in os.listdir(output_dir) if f.endswith('.pt')]
+    if existing_samples and not force:
+        print(f"Found {len(existing_samples)} existing samples in {output_dir}")
+        print(f"Use --force to regenerate them if needed")
         
-        # Monitor progress with tqdm
-        with tqdm(total=num_samples, desc="Generating samples") as pbar:
-            for future in as_completed(futures):
-                batch_samples = future.result()
-                samples_created += batch_samples
-                pbar.update(batch_samples)
+        if len(existing_samples) >= num_samples:
+            print(f"Already have {len(existing_samples)} samples, which is >= requested {num_samples}")
+            print(f"Skipping sample generation. Use --force to regenerate.")
+            return
+        else:
+            print(f"Will generate {num_samples - len(existing_samples)} additional samples")
+            start_idx = len(existing_samples)
+    else:
+        if existing_samples and force:
+            print(f"Removing {len(existing_samples)} existing samples due to --force flag")
+            for sample_file in existing_samples:
+                os.remove(os.path.join(output_dir, sample_file))
+        start_idx = 0
+    
+    # Determine number of workers
+    if workers is None:
+        # Choose based on CPU count and whether GPU is used
+        if use_gpu:
+            workers = 1  # Use single process with GPU to avoid memory issues
+        else:
+            workers = min(os.cpu_count(), 8)  # Limit to 8 workers maximum
+    
+    print(f"Generating {num_samples - start_idx} samples with {workers} workers")
+    print(f"Window size: {window_size}")
+    print(f"Output directory: {output_dir}")
+    print(f"Using GPU: {use_gpu}")
+    
+    # For GPU processing, use a single worker
+    if use_gpu:
+        # Use a single process with GPU
+        print("Using GPU for processing - running in single process mode")
+        success_count = 0
+        error_count = 0
+        
+        # Create preprocessor and move to GPU
+        preprocessor = AudioPreprocessor(window_size=window_size, use_gpu=True)
+        
+        with tqdm(range(start_idx, num_samples), desc="Generating samples") as progress:
+            for sample_id in progress:
+                try:
+                    # Select random files
+                    voice_path = random.choice(voice_files)
+                    noise_path = random.choice(noise_files)
+                    
+                    # Random mix ratio
+                    mix_ratio = random.uniform(0.3, 0.7)
+                    
+                    # Create training example
+                    mixed_spec, mask = preprocessor.create_training_example(
+                        voice_path, noise_path, mix_ratio=mix_ratio
+                    )
+                    
+                    # Move tensors to CPU
+                    mixed_spec = mixed_spec.cpu()
+                    mask = mask.cpu()
+                    
+                    # Save sample to disk
+                    output_path = os.path.join(output_dir, f"sample_{sample_id:05d}.pt")
+                    torch.save(
+                        {
+                            'mixed': mixed_spec,
+                            'mask': mask,
+                            'voice_path': voice_path,
+                            'noise_path': noise_path,
+                            'mix_ratio': mix_ratio
+                        },
+                        output_path
+                    )
+                    
+                    success_count += 1
+                    
+                except Exception as e:
+                    error_count += 1
+                    print(f"\nError creating sample {sample_id}: {e}")
                 
-                # Update progress display
-                pbar.set_postfix({
-                    'completed': f"{samples_created}/{num_samples}",
-                    'workers': num_workers
+                # Update progress
+                progress.set_postfix({
+                    'success': success_count, 
+                    'errors': error_count
                 })
+                
+                # Clean up GPU memory
+                if sample_id % 10 == 0:
+                    torch.cuda.empty_cache()
+    else:
+        # Use multiple CPU processes
+        print(f"Using {workers} CPU processes for parallel processing")
+        
+        # Process files with ProcessPoolExecutor
+        start_time = time.time()
+        success_count = 0
+        error_count = 0
+        
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            # Submit all tasks
+            future_to_id = {
+                executor.submit(
+                    create_sample, sample_id, voice_files, noise_files, output_dir, window_size, False
+                ): sample_id
+                for sample_id in range(start_idx, num_samples)
+            }
+            
+            # Process as they complete
+            with tqdm(total=len(future_to_id), desc="Generating samples") as progress:
+                for future in future_to_id:
+                    sample_id = future_to_id[future]
+                    try:
+                        success, message = future.result()
+                        if success:
+                            success_count += 1
+                        else:
+                            error_count += 1
+                            print(f"\n{message}")
+                    except Exception as e:
+                        error_count += 1
+                        print(f"\nError processing sample {sample_id}: {e}")
+                    
+                    # Update progress
+                    progress.update(1)
+                    progress.set_postfix({
+                        'success': success_count, 
+                        'errors': error_count
+                    })
     
-    # Report stats
-    elapsed_time = time.time() - start_time
-    print(f"\nSample generation complete!")
-    print(f"Created {samples_created} samples in {elapsed_time:.1f}s")
-    print(f"Average time per sample: {elapsed_time/samples_created:.2f}s")
-    print(f"Samples per second: {samples_created/elapsed_time:.1f}")
+    # Print summary
+    duration = time.time() - start_time if 'start_time' in locals() else 0
+    print(f"\nSample generation completed in {duration:.2f} seconds")
+    print(f"Successfully generated {success_count}/{num_samples - start_idx} samples")
+    if error_count > 0:
+        print(f"Encountered errors with {error_count} samples")
+    
+    # Print final stats
+    actual_samples = len([f for f in os.listdir(output_dir) if f.endswith('.pt')])
+    print(f"\nFinal sample count: {actual_samples}")
     print(f"Samples saved to: {output_dir}")
+
+def generate_samples_from_cache(
+    output_dir=None, 
+    voice_cache_dir=None, 
+    noise_cache_dir=None, 
+    num_samples=1000, 
+    window_size=DEFAULT_WINDOW_SIZE, 
+    force=False
+):
+    """
+    Generate training samples using pre-cached spectrograms for maximum efficiency.
     
-    return output_dir
+    Args:
+        output_dir: Directory to save generated samples
+        voice_cache_dir: Directory containing cached voice spectrograms
+        noise_cache_dir: Directory containing cached noise spectrograms
+        num_samples: Number of samples to generate
+        window_size: Processing window size (for naming consistency)
+        force: Whether to force regeneration of existing samples
+    """
+    # Set default paths if not provided
+    if voice_cache_dir is None:
+        voice_cache_dir = os.path.join(CACHE_DIR, 'voice')
+    if noise_cache_dir is None:
+        noise_cache_dir = os.path.join(CACHE_DIR, 'noise')
+    if output_dir is None:
+        output_dir = os.path.join(CACHE_DIR, f"samples_{window_size}")
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Check if cached spectrograms exist
+    voice_specs = [f for f in os.listdir(voice_cache_dir) if f.endswith('_spec.pt')]
+    noise_specs = [f for f in os.listdir(noise_cache_dir) if f.endswith('_spec.pt')]
+    
+    if not voice_specs:
+        print(f"No cached voice spectrograms found in {voice_cache_dir}")
+        print("Run preprocessing first: python main.py preprocess")
+        return False
+    
+    if not noise_specs:
+        print(f"No cached noise spectrograms found in {noise_cache_dir}")
+        print("Run preprocessing first: python main.py preprocess")
+        return False
+    
+    print(f"Found {len(voice_specs)} cached voice spectrograms and {len(noise_specs)} cached noise spectrograms")
+    
+    # Check if samples already exist
+    existing_samples = [f for f in os.listdir(output_dir) if f.endswith('.pt')]
+    if existing_samples and not force:
+        print(f"Found {len(existing_samples)} existing samples in {output_dir}")
+        
+        if len(existing_samples) >= num_samples:
+            print(f"Already have {len(existing_samples)} samples, which is >= requested {num_samples}")
+            print(f"Skipping sample generation. Use --force to regenerate.")
+            return True
+        else:
+            print(f"Will generate {num_samples - len(existing_samples)} additional samples")
+            start_idx = len(existing_samples)
+    else:
+        if existing_samples and force:
+            print(f"Removing {len(existing_samples)} existing samples due to --force flag")
+            for sample_file in existing_samples:
+                os.remove(os.path.join(output_dir, sample_file))
+        start_idx = 0
+    
+    print(f"\n=== GENERATING {num_samples - start_idx} TRAINING SAMPLES FROM CACHE ===")
+    print(f"Using cached spectrograms for maximum speed")
+    
+    # Prepare full paths
+    voice_spec_paths = [os.path.join(voice_cache_dir, f) for f in voice_specs]
+    noise_spec_paths = [os.path.join(noise_cache_dir, f) for f in noise_specs]
+    
+    # Generate samples
+    progress_bar = tqdm(range(start_idx, num_samples), desc="Generating samples")
+    for i in progress_bar:
+        try:
+            # Select random spectrograms
+            voice_spec_path = random.choice(voice_spec_paths)
+            noise_spec_path = random.choice(noise_spec_paths)
+            
+            # Load cached spectrograms
+            voice_spec = torch.load(voice_spec_path, map_location='cpu')
+            noise_spec = torch.load(noise_spec_path, map_location='cpu')
+            
+            # Ensure matching dimensions
+            freq_bins = min(voice_spec.shape[0], noise_spec.shape[0])
+            
+            # Standardize time dimension for both spectrograms
+            voice_spec = AudioPreprocessor().standardize_spectrogram(voice_spec[:freq_bins])
+            noise_spec = AudioPreprocessor().standardize_spectrogram(noise_spec[:freq_bins])
+            
+            # Apply random mixing ratio
+            mix_ratio = random.uniform(0.3, 0.7)
+            
+            # Mix spectrograms directly
+            mixed_spec = voice_spec * mix_ratio + noise_spec * (1 - mix_ratio)
+            
+            # Create mask (voice_spec / mixed_spec with proper bounds)
+            epsilon = 1e-10
+            mask = torch.clamp(voice_spec / (mixed_spec + epsilon), 0.0, 1.0)
+            
+            # Save sample
+            output_path = os.path.join(output_dir, f"sample_{i:05d}.pt")
+            torch.save(
+                {
+                    'mixed': mixed_spec,
+                    'mask': mask,
+                    'voice_path': os.path.basename(voice_spec_path),
+                    'noise_path': os.path.basename(noise_spec_path),
+                    'mix_ratio': mix_ratio
+                },
+                output_path
+            )
+            
+            # Update progress
+            if i % 50 == 0:
+                progress_bar.set_postfix({
+                    'voice': os.path.basename(voice_spec_path),
+                    'noise': os.path.basename(noise_spec_path)
+                })
+                
+        except Exception as e:
+            print(f"\nError generating sample {i}: {e}")
+    
+    total_samples = len([f for f in os.listdir(output_dir) if f.endswith('.pt')])
+    print(f"\n=== SAMPLE GENERATION COMPLETE ===")
+    print(f"Total samples: {total_samples}")
+    print(f"Samples saved to: {output_dir}")
+    print(f"\nTo use these samples for training:")
+    print(f"python main.py train --preprocessed --window-size {window_size}")
+    
+    return True
 
 def main():
-    parser = argparse.ArgumentParser(description='Preprocess and cache training samples')
+    parser = argparse.ArgumentParser(description='Generate preprocessed training samples')
     parser.add_argument('--samples', type=int, default=1000, 
                         help='Number of samples to generate')
-    parser.add_argument('--window-size', choices=['small', 'medium', 'large'], 
-                        default='medium', help='Window size for processing')
-    parser.add_argument('--gpu', action='store_true', default=USE_GPU,
+    parser.add_argument('--window-size', choices=list(WINDOW_SIZES.keys()), default=DEFAULT_WINDOW_SIZE,
+                        help=f'Window size for processing (default: {DEFAULT_WINDOW_SIZE})')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Directory to save samples')
+    parser.add_argument('--voice-cache-dir', type=str, default=None,
+                        help='Directory containing cached voice spectrograms')
+    parser.add_argument('--noise-cache-dir', type=str, default=None,
+                        help='Directory containing cached noise spectrograms')
+    parser.add_argument('--workers', type=int, default=None,
+                        help='Number of worker processes (default: auto-detect)')
+    parser.add_argument('--gpu', action='store_true',
                         help='Use GPU acceleration if available')
     parser.add_argument('--force', action='store_true',
                         help='Force regeneration of existing samples')
-    parser.add_argument('--output-dir', default=None,
-                        help='Directory to save preprocessed samples')
-    parser.add_argument('--workers', type=int, default=None,
-                        help='Number of worker processes (default: CPU count-1)')
+    parser.add_argument('--use-cache', action='store_true',
+                        help='Use cached spectrograms instead of raw audio (faster)')
     
     args = parser.parse_args()
     
-    # Generate samples
-    generate_training_samples(
-        num_samples=args.samples,
-        window_size=args.window_size,
-        use_gpu=args.gpu,
-        output_dir=args.output_dir,
-        force_regenerate=args.force,
-        num_workers=args.workers
-    )
+    if args.use_cache:
+        # Use cached spectrograms for sample generation
+        generate_samples_from_cache(
+            output_dir=args.output_dir,
+            voice_cache_dir=args.voice_cache_dir,
+            noise_cache_dir=args.noise_cache_dir,
+            num_samples=args.samples,
+            window_size=args.window_size,
+            force=args.force
+        )
+    else:
+        # Use original audio files for sample generation
+        generate_samples(
+            num_samples=args.samples,
+            window_size=args.window_size,
+            output_dir=args.output_dir,
+            workers=args.workers,
+            use_gpu=args.gpu,
+            force=args.force
+        )
 
 if __name__ == "__main__":
     main()

@@ -47,7 +47,17 @@ For maximum training speed, preprocess audio data:
    python main.py preprocess --convert
    ```
 
-2. **Generate training samples** (do this once, saves hours of training time):
+2. **Generate training samples from cached spectrograms** (fastest method):
+
+   ```bash
+   # Generate 1000 samples using cached spectrograms (much faster)
+   python main.py generate-samples --samples 1000 --use-cache
+
+   # Specify custom cache directories if needed
+   python main.py generate-samples --use-cache --voice-cache-dir CACHE/voice --noise-cache-dir CACHE/noise
+   ```
+
+3. **Or generate samples directly from audio files**:
 
    ```bash
    # Generate 1000 training samples using 8 CPU workers
@@ -120,13 +130,26 @@ You can process individual files:
 ```bash
 # Process a single file
 python main.py isolate --input TEST/MIXED/mixed_voice1_noise1_snr5.0_1.wav --model OUTPUT/your_model.pth
+
+# Process with debug mode to create additional output files for analysis
+python main.py isolate --input TEST/MIXED/mixed_voice1_noise1_snr5.0_1.wav --model OUTPUT/your_model.pth --debug
 ```
+
+The `--debug` flag generates additional files:
+
+- A pure isolated version without any mixing
+- A 70/30 mix of isolated and original audio
+- The original audio for comparison
+- A visualization of the isolation mask values
 
 Or batch process all test files at once:
 
 ```bash
 # Process all files in TEST/MIXED directory
 python main.py isolate-batch --model OUTPUT/your_model.pth
+
+# Process with debug files for detailed analysis
+python main.py isolate-batch --model OUTPUT/your_model.pth --debug
 
 # Process with multiple parallel workers (faster on multi-core systems)
 python main.py isolate-batch --model OUTPUT/your_model.pth --workers 4
@@ -162,16 +185,18 @@ This will display all trained models with their names and metadata.
 
 1. **For fastest training**:
 
-   - First run: `python main.py generate-samples --samples 3000 --gpu --workers 8`
-   - Then: `python main.py train --preprocessed --gpu --mixed-precision --deep-model`
+   - First run: `python main.py preprocess --convert`
+   - Then: `python main.py generate-samples --samples 3000 --use-cache`
+   - Finally: `python main.py train --preprocessed --gpu --mixed-precision --deep-model`
 
 2. **If sample generation is slow**:
 
-   - Increase worker count with `--workers` (use fewer than your CPU core count)
+   - Use the `--use-cache` option with generate-samples
+   - If not using cache, increase worker count with `--workers` (use fewer than your CPU core count)
    - For high-end GPUs, use them for preprocessing with `--gpu`
    - For low-memory systems, reduce worker count and generate fewer samples
 
-3. **If training is still slow**:
-   - Try reducing the number of samples using `--samples`
-   - Ensure you're using a GPU with `--gpu`
-   - Make sure you've run `generate-samples` first
+3. **For best isolation quality**:
+   - The default configuration now uses enhanced FFT parameters (N_FFT=2048, HOP_LENGTH=512)
+   - These provide better frequency resolution and voice separation
+   - If isolation quality is poor, try the `--debug` flag to generate diagnostic files

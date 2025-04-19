@@ -24,6 +24,7 @@ from .config import (
 )
 from .preprocessing import AudioPreprocessor, get_audio_files
 from .model import VoiceIsolationModel, MaskedLoss, VoiceIsolationModelDeep
+from .dataset import SpectrogramDataset, CachedSpectrogramDataset
 
 # Import GPU utilities if available
 try:

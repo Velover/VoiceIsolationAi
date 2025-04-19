@@ -2,250 +2,306 @@
 Script to preprocess and cache audio files for faster training
 """
 import os
+import argparse
 import torch
 import torchaudio
-import argparse
 import numpy as np
+import random
 from pathlib import Path
 from tqdm import tqdm
-import concurrent.futures
-import shutil
-from src.config import VOICE_DIR, NOISE_DIR, CACHE_DIR, SAMPLE_RATE, SUPPORTED_FORMATS
-from src.preprocessing import AudioPreprocessor, get_audio_files
+import multiprocessing
+import time
+from concurrent.futures import ProcessPoolExecutor
+import traceback
 
-def check_directories():
-    """Check if required directories exist and have files, create if needed"""
-    # Check and create directories
-    dirs_to_check = {
-        'VOICE': VOICE_DIR,
-        'NOISE': NOISE_DIR,
-        'CACHE': CACHE_DIR,
-        'CACHE/voice': os.path.join(CACHE_DIR, 'voice'),
-        'CACHE/noise': os.path.join(CACHE_DIR, 'noise')
-    }
+# Import project modules
+from src.preprocessing import AudioPreprocessor, get_audio_files
+from src.config import (
+    VOICE_DIR, NOISE_DIR, CACHE_DIR, SAMPLE_RATE, 
+    SUPPORTED_FORMATS, WINDOW_SIZES, DEFAULT_WINDOW_SIZE
+)
+
+def process_file(file_path, output_dir, window_size='medium', convert=False):
+    """
+    Process a single audio file: convert format if needed and cache spectrogram.
     
-    for name, dir_path in dirs_to_check.items():
-        os.makedirs(dir_path, exist_ok=True)
+    Args:
+        file_path: Path to audio file
+        output_dir: Directory to save processed files
+        window_size: Processing window size
+        convert: Whether to convert WAV files to more efficient format
         
-    # Check for audio files
+    Returns:
+        Tuple of (success, message)
+    """
+    try:
+        # Initialize preprocessor (no GPU for multiprocessing compatibility)
+        preprocessor = AudioPreprocessor(window_size=window_size, use_gpu=False)
+        
+        # Get filename and extension
+        file_name = os.path.basename(file_path)
+        file_base, file_ext = os.path.splitext(file_name)
+        spec_cache_path = os.path.join(output_dir, f"{file_base}_spec.pt")
+        
+        # Skip if spectrogram cache already exists
+        if os.path.exists(spec_cache_path):
+            return (True, f"Skipped {file_name} (cache exists)")
+        
+        # Convert format if requested
+        if convert and file_ext.lower() == '.wav':
+            flac_path = os.path.join(output_dir, f"{file_base}.flac")
+            
+            # Skip if FLAC already exists
+            if os.path.exists(flac_path):
+                file_path = flac_path
+            else:
+                # Load audio
+                audio, sr = torchaudio.load(file_path)
+                
+                # Convert to mono if needed
+                if audio.shape[0] > 1:
+                    audio = torch.mean(audio, dim=0, keepdim=True)
+                
+                # Resample if needed
+                if sr != SAMPLE_RATE:
+                    resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=SAMPLE_RATE)
+                    audio = resampler(audio)
+                
+                # Save as FLAC
+                torchaudio.save(flac_path, audio, SAMPLE_RATE)
+                file_path = flac_path
+        
+        # Load audio
+        audio = preprocessor.load_audio(file_path)
+        
+        # Compute spectrogram
+        spectrogram = preprocessor.compute_spectrogram(audio)
+        
+        # Save spectrogram
+        torch.save(spectrogram, spec_cache_path)
+        
+        return (True, f"Processed {file_name}")
+    except Exception as e:
+        error_details = traceback.format_exc()
+        return (False, f"Error processing {file_path}: {str(e)}\n{error_details}")
+
+def create_example_files():
+    """
+    Create example audio files if the VOICE and NOISE directories are empty.
+    
+    This helps new users get started with sample data.
+    """
+    voice_files = get_audio_files(VOICE_DIR)
+    noise_files = get_audio_files(NOISE_DIR)
+    
+    if voice_files and noise_files:
+        print("Example files not needed - voice and noise directories already contain files.")
+        return
+    
+    print("Creating example audio files...")
+    
+    # Create a simple sine wave for voice example
+    if not voice_files:
+        print("Creating example voice files...")
+        for i in range(1, 4):
+            # Create sine wave at different frequencies
+            duration = 3.0  # 3 seconds
+            frequency = 220 * i  # Different frequencies
+            sample_rate = SAMPLE_RATE
+            t = torch.arange(0, duration, 1.0/sample_rate)
+            
+            # Add some amplitude modulation to make it more voice-like
+            modulation = 0.5 + 0.5 * torch.sin(2 * torch.pi * 2 * t)
+            audio = torch.sin(2 * torch.pi * frequency * t) * modulation
+            
+            # Add a bit of noise
+            audio = audio + 0.05 * torch.randn_like(audio)
+            
+            # Normalize
+            audio = audio / audio.abs().max()
+            
+            # Save as WAV
+            os.makedirs(VOICE_DIR, exist_ok=True)
+            output_path = os.path.join(VOICE_DIR, f"example_voice_{i}.wav")
+            torchaudio.save(output_path, audio.unsqueeze(0), sample_rate)
+            print(f"Created {output_path}")
+    
+    # Create noise examples
+    if not noise_files:
+        print("Creating example noise files...")
+        for i in range(1, 4):
+            # Create different types of noise
+            duration = 3.0  # 3 seconds
+            sample_rate = SAMPLE_RATE
+            samples = int(duration * sample_rate)
+            
+            if i == 1:
+                # White noise
+                audio = torch.randn(samples)
+            elif i == 2:
+                # Colored noise (brown-ish)
+                audio = torch.zeros(samples)
+                current = 0
+                for j in range(samples):
+                    current += random.uniform(-1, 1) * 0.01
+                    current = max(-0.5, min(0.5, current))  # Clamp
+                    audio[j] = current
+            else:
+                # Sine wave mixture (simulating background music)
+                t = torch.arange(0, duration, 1.0/sample_rate)
+                audio = torch.sin(2 * torch.pi * 440 * t) * 0.3
+                audio += torch.sin(2 * torch.pi * 330 * t) * 0.2
+                audio += torch.sin(2 * torch.pi * 247 * t) * 0.15
+            
+            # Normalize
+            audio = audio / audio.abs().max() * 0.8
+            
+            # Save as WAV
+            os.makedirs(NOISE_DIR, exist_ok=True)
+            output_path = os.path.join(NOISE_DIR, f"example_noise_{i}.wav")
+            torchaudio.save(output_path, audio.unsqueeze(0), sample_rate)
+            print(f"Created {output_path}")
+    
+    print("Example files created successfully.")
+
+def preprocess_files(workers=None, convert=False, window_size=DEFAULT_WINDOW_SIZE, create_examples=False):
+    """
+    Preprocess all audio files in VOICE and NOISE directories.
+    
+    Args:
+        workers: Number of worker processes (None = auto-detect)
+        convert: Whether to convert WAV files to more efficient FLAC format
+        window_size: Processing window size
+        create_examples: Whether to create example files if directories are empty
+    """
+    # Set up output directories
+    voice_cache_dir = os.path.join(CACHE_DIR, 'voice')
+    noise_cache_dir = os.path.join(CACHE_DIR, 'noise')
+    os.makedirs(voice_cache_dir, exist_ok=True)
+    os.makedirs(noise_cache_dir, exist_ok=True)
+    
+    # Create example files if requested
+    if create_examples:
+        create_example_files()
+    
+    # Get all audio files
     voice_files = get_audio_files(VOICE_DIR)
     noise_files = get_audio_files(NOISE_DIR)
     
     if not voice_files:
-        print("=" * 80)
-        print(f"WARNING: No voice files found in {VOICE_DIR}")
-        print("Please add some voice audio files (.mp3, .wav, or .flac) to the VOICE directory.")
-        print("Example: Recordings of the target person speaking alone")
-        print("=" * 80)
-        
-    if not noise_files:
-        print("=" * 80)
-        print(f"WARNING: No noise files found in {NOISE_DIR}")
-        print("Please add some noise audio files (.mp3, .wav, or .flac) to the NOISE directory.")
-        print("Examples:")
-        print("  - Recordings of other people talking")
-        print("  - Background noise recordings")
-        print("  - Any sounds that typically occur with the target voice")
-        print("=" * 80)
-    
-    return len(voice_files) > 0 and len(noise_files) > 0
-
-def preprocess_audio_file(file_path, output_dir, sample_rate=SAMPLE_RATE, window_size='medium'):
-    """Preprocess a single audio file and save the spectrogram to disk"""
-    try:
-        # Get the relative path to maintain folder structure
-        rel_path = os.path.basename(file_path)
-        # Create output filename (replace extension with .pt)
-        output_name = f"{os.path.splitext(rel_path)[0]}.pt"
-        output_path = os.path.join(output_dir, output_name)
-        
-        # Skip if already processed
-        if os.path.exists(output_path):
-            return True, file_path
-            
-        # Load audio
-        audio, sr = torchaudio.load(file_path)
-        
-        # Convert to mono if needed
-        if audio.shape[0] > 1:
-            audio = torch.mean(audio, dim=0, keepdim=True)
-            
-        # Resample if needed
-        if sr != sample_rate:
-            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=sample_rate)
-            audio = resampler(audio)
-            
-        # Initialize preprocessor
-        preprocessor = AudioPreprocessor(window_size=window_size)
-        
-        # Compute spectrogram
-        spect = preprocessor.compute_spectrogram(audio)
-        
-        # Save as tensor file
-        torch.save(spect, output_path)
-        
-        return True, file_path
-    except Exception as e:
-        return False, f"Error processing {file_path}: {str(e)}"
-
-def preprocess_directory(input_dir, output_dir, workers=4):
-    """Preprocess all audio files in a directory using multiple workers"""
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Get all audio files
-    audio_files = get_audio_files(input_dir)
-    if not audio_files:
-        print(f"No audio files found in {input_dir}")
+        print(f"No voice files found in {VOICE_DIR}")
         return
-        
-    print(f"Found {len(audio_files)} files in {input_dir}")
-    print(f"Processing with {workers} worker threads...")
     
-    # Process files in parallel
+    if not noise_files:
+        print(f"No noise files found in {NOISE_DIR}")
+        return
+    
+    total_files = len(voice_files) + len(noise_files)
+    print(f"Found {len(voice_files)} voice files and {len(noise_files)} noise files")
+    
+    # Determine number of workers
+    if workers is None:
+        workers = min(os.cpu_count(), 8)  # Limit to 8 workers maximum
+        
+    print(f"Starting preprocessing with {workers} workers")
+    print(f"Window size: {window_size}")
+    if convert:
+        print("Will convert WAV files to FLAC for more efficient storage")
+    
+    # Process files with ProcessPoolExecutor
+    start_time = time.time()
+    
+    # Process voice files
+    print("\nProcessing voice files...")
     success_count = 0
     error_count = 0
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(preprocess_audio_file, f, output_dir) for f in audio_files]
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        # Submit all tasks
+        future_to_file = {
+            executor.submit(process_file, file_path, voice_cache_dir, window_size, convert): file_path
+            for file_path in voice_files
+        }
         
-        # Show progress with tqdm
-        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
-            success, result = future.result()
-            if success:
-                success_count += 1
-            else:
+        # Process as they complete
+        for future in tqdm(future_to_file, total=len(voice_files)):
+            file_path = future_to_file[future]
+            try:
+                success, message = future.result()
+                if success:
+                    success_count += 1
+                else:
+                    error_count += 1
+                    print(f"\nError: {message}")
+            except Exception as e:
                 error_count += 1
-                print(result)
+                print(f"\nError processing {file_path}: {e}")
     
-    print(f"Preprocessing complete: {success_count} succeeded, {error_count} failed")
-    return success_count, error_count
-
-def convert_to_efficient_format(directory, target_format='.flac', sample_rate=SAMPLE_RATE):
-    """Convert WAV files to more efficient format to save space"""
-    audio_files = [f for f in get_audio_files(directory) if os.path.splitext(f)[1].lower() == '.wav']
+    # Process noise files
+    print("\nProcessing noise files...")
     
-    if not audio_files:
-        print(f"No WAV files found in {directory}")
-        return 0
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        # Submit all tasks
+        future_to_file = {
+            executor.submit(process_file, file_path, noise_cache_dir, window_size, convert): file_path
+            for file_path in noise_files
+        }
         
-    print(f"Converting {len(audio_files)} WAV files to {target_format}...")
+        # Process as they complete
+        for future in tqdm(future_to_file, total=len(noise_files)):
+            file_path = future_to_file[future]
+            try:
+                success, message = future.result()
+                if success:
+                    success_count += 1
+                else:
+                    error_count += 1
+                    print(f"\nError: {message}")
+            except Exception as e:
+                error_count += 1
+                print(f"\nError processing {file_path}: {e}")
     
-    converted = 0
-    for file_path in tqdm(audio_files):
-        try:
-            # Load audio
-            audio, sr = torchaudio.load(file_path)
-            
-            # Resample if needed
-            if sr != sample_rate:
-                resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=sample_rate)
-                audio = resampler(audio)
-            
-            # Get new filename
-            new_path = os.path.splitext(file_path)[0] + target_format
-            
-            # Save in new format
-            torchaudio.save(new_path, audio, sample_rate)
-            
-            # Remove original file to save space
-            os.remove(file_path)
-            converted += 1
-            
-        except Exception as e:
-            print(f"Error converting {file_path}: {e}")
+    # Print summary
+    duration = time.time() - start_time
+    print(f"\nPreprocessing completed in {duration:.2f} seconds")
+    print(f"Successfully processed {success_count}/{total_files} files")
+    if error_count > 0:
+        print(f"Encountered errors with {error_count} files")
     
-    print(f"Converted {converted} files to {target_format}")
-    return converted
-
-def extract_example_files():
-    """Extract example files if directories are empty"""
-    # Check if both directories are empty
-    voice_files = get_audio_files(VOICE_DIR)
-    noise_files = get_audio_files(NOISE_DIR)
+    # Print cache stats
+    voice_cache_files = [f for f in os.listdir(voice_cache_dir) if f.endswith('_spec.pt')]
+    noise_cache_files = [f for f in os.listdir(noise_cache_dir) if f.endswith('_spec.pt')]
     
-    if voice_files or noise_files:
-        return  # Don't extract if files already exist
+    print(f"\nCache summary:")
+    print(f"  Voice spectrograms: {len(voice_cache_files)}")
+    print(f"  Noise spectrograms: {len(noise_cache_files)}")
     
-    print("No audio files found. Creating example files for testing...")
-    
-    # Create a simple sine wave audio file as an example
-    duration = 3  # seconds
-    sample_rate = SAMPLE_RATE
-    t = torch.arange(0, duration, 1/sample_rate)
-    
-    # Voice example (440 Hz tone)
-    voice_signal = 0.5 * torch.sin(2 * np.pi * 440 * t)
-    # Save as both WAV and FLAC to demonstrate support for both formats
-    voice_path_wav = os.path.join(VOICE_DIR, "example_voice.wav")
-    voice_path_flac = os.path.join(VOICE_DIR, "example_voice.flac")
-    torchaudio.save(voice_path_wav, voice_signal.unsqueeze(0), sample_rate)
-    torchaudio.save(voice_path_flac, voice_signal.unsqueeze(0), sample_rate)
-    
-    # Noise example (white noise)
-    noise_signal = 0.2 * torch.randn_like(t)
-    noise_path_wav = os.path.join(NOISE_DIR, "example_noise.wav")
-    noise_path_flac = os.path.join(NOISE_DIR, "example_noise.flac")
-    torchaudio.save(noise_path_wav, noise_signal.unsqueeze(0), sample_rate)
-    torchaudio.save(noise_path_flac, noise_signal.unsqueeze(0), sample_rate)
-    
-    print("Created example files:")
-    print(f"  Voice: {voice_path_wav}, {voice_path_flac}")
-    print(f"  Noise: {noise_path_wav}, {noise_path_flac}")
-    print("NOTE: These are just placeholder examples. Replace them with real audio files.")
+    if convert:
+        voice_flac_files = [f for f in os.listdir(voice_cache_dir) if f.endswith('.flac')]
+        noise_flac_files = [f for f in os.listdir(noise_cache_dir) if f.endswith('.flac')]
+        print(f"  Converted FLAC files: {len(voice_flac_files) + len(noise_flac_files)}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Preprocess audio files for faster training')
-    parser.add_argument('--convert', action='store_true', 
+    parser = argparse.ArgumentParser(description='Preprocess audio files for training')
+    parser.add_argument('--workers', type=int, default=None, 
+                        help='Number of worker processes (default: auto-detect)')
+    parser.add_argument('--convert', action='store_true',
                         help='Convert WAV files to more efficient FLAC format')
-    parser.add_argument('--workers', type=int, default=os.cpu_count(),
-                        help='Number of worker threads for preprocessing')
-    parser.add_argument('--window-size', choices=['small', 'medium', 'large'], 
-                        default='medium', help='Window size for processing')
+    parser.add_argument('--window-size', choices=list(WINDOW_SIZES.keys()), default=DEFAULT_WINDOW_SIZE,
+                        help=f'Window size for processing (default: {DEFAULT_WINDOW_SIZE})')
     parser.add_argument('--create-examples', action='store_true',
                         help='Create example audio files if directories are empty')
+    parser.add_argument('--samples', type=int, default=0,
+                        help='Number of training samples to preprocess (0 for all)')
     
     args = parser.parse_args()
     
-    # Setup cache directories
-    voice_cache_dir = os.path.join(CACHE_DIR, 'voice')
-    noise_cache_dir = os.path.join(CACHE_DIR, 'noise')
-    
-    print("=== AUDIO PREPROCESSING UTILITY ===")
-    
-    # Check if directories exist and have files
-    if not check_directories() and args.create_examples:
-        extract_example_files()
-    
-    # Convert files if requested
-    if args.convert:
-        print("\n=== CONVERTING AUDIO FILES TO EFFICIENT FORMAT ===")
-        convert_to_efficient_format(VOICE_DIR)
-        convert_to_efficient_format(NOISE_DIR)
-    
-    # Preprocess files
-    print("\n=== PREPROCESSING VOICE FILES ===")
-    preprocess_directory(VOICE_DIR, voice_cache_dir, args.workers)
-    
-    print("\n=== PREPROCESSING NOISE FILES ===")
-    preprocess_directory(NOISE_DIR, noise_cache_dir, args.workers)
-    
-    print("\nPreprocessing complete! You can now train with cached data.")
-    print("Run: python main.py train --use-cache --gpu --mixed-precision --deep-model")
-    
-    # Final check - if directories are still empty after processing
-    voice_files = get_audio_files(VOICE_DIR)
-    noise_files = get_audio_files(NOISE_DIR)
-    
-    if not voice_files or not noise_files:
-        print("\n" + "=" * 80)
-        print("IMPORTANT: One or more directories are still empty!")
-        if not voice_files:
-            print(" - VOICE directory is empty. Add target person's voice recordings.")
-        if not noise_files:
-            print(" - NOISE directory is empty. Add background noise recordings.")
-        print("\nUse the --create-examples flag to create test files for demonstration.")
-        print("=" * 80)
+    preprocess_files(
+        workers=args.workers,
+        convert=args.convert,
+        window_size=args.window_size,
+        create_examples=args.create_examples
+    )
 
 if __name__ == "__main__":
     main()
