@@ -18,8 +18,14 @@ USE_GPU = torch.cuda.is_available()
 GPU_DEVICE = 0
 MIXED_PRECISION = True  # Use mixed precision training (FP16) for faster computation
 CUDNN_BENCHMARK = True  # Set to True for fixed-size inputs for better performance
-GPU_MEMORY_FRACTION = 0.8  # Use 80% of GPU memory to avoid OOM errors
+GPU_MEMORY_FRACTION = 0.85 
 FORCE_CPU_DATALOADING = True  # Force loading data on CPU regardless of GPU availability
+
+# Performance tuning
+BATCH_SIZE = 64  # Increased from 32 to utilize more GPU memory
+DATALOADER_WORKERS = 2  # Number of workers for data loading
+DATALOADER_PREFETCH = 2  # Number of batches to prefetch
+DATALOADER_PIN_MEMORY = True  # Pin memory for faster CPU->GPU transfers
 
 # Audio processing configurations
 SAMPLE_RATE = 16000  # Hz
@@ -34,7 +40,6 @@ DEFAULT_WINDOW_SIZE = 'medium'  # Default window size choice
 N_FFT = 512  # Number of frequency bins for FFT
 HOP_LENGTH = 128  # Hop length for STFT
 N_MELS = 64  # Number of Mel bands
-BATCH_SIZE = 32
 LEARNING_RATE = 0.001
 EPOCHS = 50
 

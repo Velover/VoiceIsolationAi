@@ -119,8 +119,22 @@ class AudioPreprocessor:
         Returns:
             Magnitude spectrogram tensor [frequency_bins, time_frames]
         """
-        stft = self.compute_stft(audio)
-        return torch.abs(stft)
+        # Ensure computation happens on the GPU
+        if self.use_gpu and audio.device.type != 'cuda':
+            audio = audio.to(self.device, non_blocking=True)
+        
+        # Using a CUDA stream if available to parallelize with other GPU operations
+        if self.use_gpu:
+            with torch.cuda.stream(torch.cuda.Stream()):
+                stft = self.compute_stft(audio)
+                magnitude = torch.abs(stft)
+                # Synchronize to ensure computation is complete
+                torch.cuda.current_stream().synchronize()
+        else:
+            stft = self.compute_stft(audio)
+            magnitude = torch.abs(stft)
+        
+        return magnitude
     
     def standardize_spectrogram(self, spectrogram: torch.Tensor, time_dim: int = SPEC_TIME_DIM) -> torch.Tensor:
         """

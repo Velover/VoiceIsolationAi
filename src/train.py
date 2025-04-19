@@ -11,14 +11,23 @@ import random
 import matplotlib.pyplot as plt
 import argparse
 from tqdm import tqdm
+import gc
 
 from .config import (
     VOICE_DIR, NOISE_DIR, OUTPUT_DIR, BATCH_SIZE, EPOCHS, 
     LEARNING_RATE, N_FFT, VALIDATION_SPLIT, RANDOM_SEED,
-    USE_GPU, GPU_DEVICE, MIXED_PRECISION, CUDNN_BENCHMARK, GPU_MEMORY_FRACTION
+    USE_GPU, GPU_DEVICE, MIXED_PRECISION, CUDNN_BENCHMARK, GPU_MEMORY_FRACTION,
+    DATALOADER_WORKERS, DATALOADER_PREFETCH, DATALOADER_PIN_MEMORY
 )
 from .preprocessing import AudioPreprocessor, get_audio_files
 from .model import VoiceIsolationModel, MaskedLoss
+
+# Import GPU utilities if available
+try:
+    from .gpu_utils import GPUMonitor, optimize_for_gpu
+except ImportError:
+    GPUMonitor = None
+    optimize_for_gpu = lambda: None
 
 # Set random seed for reproducibility
 torch.manual_seed(RANDOM_SEED)
@@ -27,8 +36,14 @@ np.random.seed(RANDOM_SEED)
 
 # Set CUDA-specific configurations
 if USE_GPU:
+    # Optimize CUDA settings for maximum performance
     torch.cuda.manual_seed(RANDOM_SEED)
     torch.backends.cudnn.benchmark = CUDNN_BENCHMARK
+    torch.backends.cudnn.enabled = True
+    
+    # Enable TensorFloat32 precision if available (faster on newer GPUs)
+    if torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8:
+        torch.set_float32_matmul_precision('high')  # Use TF32 precision
     
     # Limit GPU memory usage if needed
     if GPU_MEMORY_FRACTION < 1.0:
@@ -42,23 +57,15 @@ if USE_GPU:
         except RuntimeError as e:
             print(f"⚠️ Could not set GPU memory fraction: {e}")
             print("Continuing without memory limits.")
+    
+    # Optimize GPU settings
+    optimize_for_gpu()
 
 class SpectrogramDataset(Dataset):
     """Dataset for spectrogram and masks"""
     
     def __init__(self, voice_dir: str, noise_dir: str, preprocessor: AudioPreprocessor, 
                  num_samples: int = 1000, transform=None, use_gpu: bool = USE_GPU):
-        """
-        Initialize the dataset.
-        
-        Args:
-            voice_dir: Directory with voice audio files
-            noise_dir: Directory with noise audio files
-            preprocessor: AudioPreprocessor instance
-            num_samples: Number of examples to generate
-            transform: Optional transformations
-            use_gpu: Whether to use GPU acceleration
-        """
         self.voice_files = get_audio_files(voice_dir)
         self.noise_files = get_audio_files(noise_dir)
         self.preprocessor = preprocessor
@@ -197,6 +204,10 @@ def train_model(
         # Force CUDA initialization to check if it's really working
         torch.cuda.synchronize()
         
+        # Clear GPU cache before starting
+        torch.cuda.empty_cache()
+        gc.collect()  # Also collect Python garbage
+        
         # Test tensor creation
         test = torch.ones(1, device=device)
         if test.device.type == 'cuda':
@@ -206,13 +217,17 @@ def train_model(
             print(f"\n=== GPU ACCELERATION ENABLED ===")
             print(f"Device: {gpu_name} ({gpu_mem:.1f} GB)")
             
-            # Clear GPU cache
-            torch.cuda.empty_cache()
-            
             # Measure GPU memory usage before training
             allocated_before = torch.cuda.memory_allocated(GPU_DEVICE) / 1024**2
             reserved_before = torch.cuda.memory_reserved(GPU_DEVICE) / 1024**2
             print(f"Initial GPU Memory: {allocated_before:.1f} MB allocated, {reserved_before:.1f} MB reserved")
+            
+            # Start GPU monitoring if available
+            gpu_monitor = None
+            if GPUMonitor is not None:
+                gpu_monitor = GPUMonitor(device_id=GPU_DEVICE)
+                gpu_monitor.start()
+                print("Started GPU utilization monitoring")
         else:
             print("⚠️ Failed to create tensor on GPU despite CUDA being available!")
             print("⚠️ Falling back to CPU...")
@@ -247,29 +262,44 @@ def train_model(
     print(f"Training samples: {train_size}")
     print(f"Validation samples: {val_size}")
     print(f"Batch size: {batch_size}")
+    print(f"Num workers: {DATALOADER_WORKERS}")
+    print(f"Prefetch factor: {DATALOADER_PREFETCH}")
     
-    # Create dataloaders
+    # Create dataloaders with optimized settings for GPU
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
         shuffle=True,
-        num_workers=0 if use_gpu else 2,  # Reduce workers when using GPU to prevent contention
-        pin_memory=use_gpu and device.type == 'cuda'  # Only pin if actually using GPU
+        num_workers=DATALOADER_WORKERS,
+        pin_memory=DATALOADER_PIN_MEMORY and device.type == 'cuda',
+        prefetch_factor=DATALOADER_PREFETCH,
+        persistent_workers=DATALOADER_WORKERS > 0,
+        drop_last=True  # Drop incomplete batches to maintain optimal GPU utilization
     )
     
     val_loader = DataLoader(
         val_dataset, 
         batch_size=batch_size, 
         shuffle=False,
-        num_workers=0 if use_gpu else 2,
-        pin_memory=use_gpu and device.type == 'cuda'  # Only pin if actually using GPU
+        num_workers=DATALOADER_WORKERS,
+        pin_memory=DATALOADER_PIN_MEMORY and device.type == 'cuda',
+        prefetch_factor=DATALOADER_PREFETCH,
+        persistent_workers=DATALOADER_WORKERS > 0,
+        drop_last=True
     )
     
     print(f"\n=== INITIALIZING MODEL ===")
     # Initialize model, loss, and optimizer
     model = VoiceIsolationModel(n_fft=N_FFT)
     loss_fn = MaskedLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    
+    # Use AdamW optimizer for better performance
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    
+    # Add learning rate scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5, verbose=True
+    )
     
     # Move model to GPU
     model.to(device)
@@ -287,7 +317,8 @@ def train_model(
     # Training history
     history = {
         'train_loss': [],
-        'val_loss': []
+        'val_loss': [],
+        'learning_rates': []
     }
     
     # Training loop
@@ -295,6 +326,13 @@ def train_model(
     if use_mixed_precision and device.type == 'cuda':
         print("Mixed precision (FP16): ENABLED ✓")
     progress_bar = tqdm(range(epochs), desc="Training", unit="epoch")
+    
+    # Create CUDA streams for overlapping operations
+    if device.type == 'cuda':
+        # Main computing stream
+        compute_stream = torch.cuda.Stream()
+        # Data transfer stream
+        transfer_stream = torch.cuda.Stream()
     
     for epoch in progress_bar:
         # Training phase
@@ -310,30 +348,56 @@ def train_model(
             unit="batch"
         )
         
+        # Force garbage collection before epoch
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        gc.collect()
+        
         for batch in batch_progress:
-            # Move batch to device - ensure this happens correctly
-            mixed_spec = batch['mixed'].to(device, non_blocking=True)
-            target_mask = batch['mask'].to(device, non_blocking=True)
-            
-            # Forward pass with mixed precision - simplified approach
-            optimizer.zero_grad()
-            
-            # Use regular forward pass if mixed precision is disabled or on CPU
-            if use_mixed_precision and device.type == 'cuda':
-                with torch.autocast(device_type=device.type, dtype=torch.float16):
-                    pred_mask = model(mixed_spec)
-                    loss = loss_fn(pred_mask, target_mask)
+            if device.type == 'cuda':
+                # Use CUDA streams for parallel operations
+                with torch.cuda.stream(transfer_stream):
+                    # Move data to GPU in the transfer stream
+                    mixed_spec = batch['mixed'].to(device, non_blocking=True)
+                    target_mask = batch['mask'].to(device, non_blocking=True)
                 
-                # Backward pass with gradient scaling for mixed precision
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                # Synchronize streams to ensure data is ready
+                torch.cuda.current_stream().wait_stream(transfer_stream)
+                
+                # Process in compute stream
+                with torch.cuda.stream(compute_stream):
+                    # Forward pass with mixed precision
+                    optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
+                    
+                    if use_mixed_precision:
+                        with torch.autocast(device_type=device.type, dtype=torch.float16):
+                            pred_mask = model(mixed_spec)
+                            loss = loss_fn(pred_mask, target_mask)
+                        
+                        # Backward pass with gradient scaling for mixed precision
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        # Standard training path
+                        pred_mask = model(mixed_spec)
+                        loss = loss_fn(pred_mask, target_mask)
+                        loss.backward()
+                        optimizer.step()
             else:
-                # Standard training path
+                # CPU path - simpler without streams
+                mixed_spec = batch['mixed'].to(device)
+                target_mask = batch['mask'].to(device)
+                
+                optimizer.zero_grad(set_to_none=True)
                 pred_mask = model(mixed_spec)
                 loss = loss_fn(pred_mask, target_mask)
                 loss.backward()
                 optimizer.step()
+            
+            # Wait for compute stream to finish
+            if device.type == 'cuda':
+                torch.cuda.current_stream().wait_stream(compute_stream)
             
             # Update progress bar with current loss
             batch_progress.set_postfix(loss=f"{loss.item():.4f}")
@@ -374,13 +438,26 @@ def train_model(
         history['train_loss'].append(avg_train_loss)
         history['val_loss'].append(avg_val_loss)
         
+        # Update learning rate based on validation loss
+        scheduler.step(avg_val_loss)
+        
+        # Save current learning rate to history
+        current_lr = optimizer.param_groups[0]['lr']
+        history['learning_rates'].append(current_lr)
+        
         # Update epoch progress bar
         epoch_time = time.time() - start_time
         progress_bar.set_postfix({
             'train_loss': f"{avg_train_loss:.4f}",
-            'val_loss': f"{avg_val_loss:.4f}", 
+            'val_loss': f"{avg_val_loss:.4f}",
+            'lr': f"{current_lr:.6f}",
             'time': f"{epoch_time:.2f}s"
         })
+    
+    # Stop GPU monitoring if started
+    if use_gpu and 'gpu_monitor' in locals() and gpu_monitor is not None:
+        gpu_monitor.stop()
+        gpu_monitor.print_summary()
     
     # Show GPU utilization after training
     if device.type == 'cuda':

@@ -44,6 +44,14 @@ def setup_cuda_for_win_nvidia():
             props = torch.cuda.get_device_properties(i)
             print(f"  Device {i}: {props.name} ({props.total_memory / 1024**3:.1f} GB)")
         
+        # Configure for maximum performance
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.enabled = True
+        
+        # Enable TensorFloat32 if available (on Ampere GPUs)
+        if torch.cuda.get_device_capability(0)[0] >= 8:
+            torch.set_float32_matmul_precision('high')
+        
         # Set environment variables for Windows
         if sys.platform == 'win32':
             # Try to locate CUDA installation
