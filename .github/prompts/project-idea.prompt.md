@@ -20,7 +20,7 @@ The project aims to train ai on the specific person's voice and be able to isola
 - no need to create an implementation for the microphone integration, for now, only simple audio file input and audio file output
 - keep in mind, audio files provided in training data are of various length
 - keep in mind, audio files are separated (VOICE, NOISE) and have to be combined in various ways for training (ONLY NOISE, ONLY VOICE, COMBINATION, NONE)
-- keep in mind, audio formats are (mp3, wav)
+- keep in mind, audio formats are (mp3, wav, .flac)
 - keep everything documented
 - create a quickstart
 - keep in mind, the sounds might be of various frequencies

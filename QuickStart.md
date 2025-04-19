@@ -17,23 +17,40 @@ A deep learning system for isolating a specific person's voice from background n
    ```
 
 2. **Prepare data directories**:
-   - Create `VOICE` folder with target person's voice recordings (.mp3 or .wav)
-   - Create `NOISE` folder with other voices and background noise (.mp3 or .wav)
+
+   - Create `VOICE` folder with target person's voice recordings (.mp3, .wav, or .flac)
+   - Create `NOISE` folder with other voices and background noise (.mp3, .wav, or .flac)
+
+   If you don't have audio files yet, you can create test examples:
+
+   ```bash
+   python main.py preprocess --create-examples
+   ```
+
+3. **Preprocess audio for faster training** (highly recommended):
+
+   ```bash
+   # Convert large WAV files to more efficient FLAC format and cache spectrograms
+   python main.py preprocess --convert
+
+   # Only cache spectrograms (if you want to keep original WAV files)
+   python main.py preprocess
+   ```
 
 ### Training the Model
 
 ```bash
-# Basic training with default parameters (auto-detects optimal sample count)
+# Train with cached data (fastest method, recommended)
+python main.py train --use-cache --gpu --mixed-precision --deep-model
+
+# Basic training with default parameters
 python main.py train
 
 # Advanced training with custom parameters
 python main.py train --window-size medium --epochs 50 --batch-size 64
 
-# Maximum GPU utilization with auto-detection (recommended)
+# Maximum GPU utilization without preprocessing
 python main.py train --gpu --mixed-precision --deep-model
-
-# Custom configuration with all options
-python main.py train --gpu --mixed-precision --deep-model --window-size medium --epochs 50 --batch-size 64 --auto-detect-samples
 ```
 
 Training parameters:
@@ -46,99 +63,28 @@ Training parameters:
 - `--mixed-precision`: Use FP16 for additional performance on compatible GPUs
 - `--auto-detect-samples`: Automatically determine optimal sample count based on GPU memory
 - `--deep-model`: Use deeper model architecture for maximizing GPU computational utilization
+- `--use-cache`: Use preprocessed cached data to dramatically speed up training
 
 The trained model will be saved in the `OUTPUT` directory.
 
-### Using the Model
-
-```bash
-# Isolate voice in an audio file
-python main.py isolate --input path/to/recording.wav --model OUTPUT/voice_isolation_model.pth
-
-# Specify custom output path
-python main.py isolate --input recording.wav --model OUTPUT/model.pth --output isolated_voice.wav
-
-# Use GPU for faster processing
-python main.py isolate --input recording.wav --model OUTPUT/model.pth --gpu
-```
-
-### Optimizing GPU Performance
-
-For best GPU utilization:
-
-```bash
-# Check GPU information and performance
-python main.py gpu-info
-
-# Run training with optimal GPU settings
-python main.py train --gpu --mixed-precision --deep-model
-```
-
-The system will:
-
-1. Auto-detect the optimal number of training samples based on your GPU memory
-2. Use CUDA streams for parallel data transfer and computation
-3. Utilize a deeper model with more computations for higher GPU utilization
-4. Apply all performance optimizations automatically
-
-## Project Overview
-
-This system:
-
-1. Processes audio using Short-Time Fourier Transform
-2. Uses a CNN to generate isolation masks for the target voice
-3. Applies the mask to isolate the specific voice
-4. Outputs the cleaned audio file
-
-## Detailed Instructions
-
-### Data Preparation
-
-- **VOICE folder**: Place multiple recordings of the target person speaking alone
-- **NOISE folder**: Add recordings of:
-  - Other people speaking
-  - Background noises
-  - Environmental sounds
-  - Any sounds that typically interfere with the target voice
-
-For best results:
-
-- Use diverse recordings in different acoustic environments
-- Include samples with different voice levels and tones
-- Ensure recordings are clean and representative of real-world scenarios
-
-### Training Tips
-
-- The system now automatically determines the optimal number of samples for your hardware
-- Use the `--deep-model` flag to fully utilize GPU computational power
-- For very noisy environments, manually increase the number of training samples
-- If the model struggles with certain types of noise, add more similar noise samples to the training data
-
 ### Troubleshooting
 
-- **Poor isolation results**: Try re-training with more diverse noise samples
-- **Training errors**: Ensure audio files are properly formatted and not corrupted
-- **Out of memory errors**: Let the auto-detection handle sample count, or manually reduce batch size
-- **Low GPU utilization**: Use the `--deep-model` flag to increase computational workload
-- **GPU-related errors**: Make sure you have the latest GPU drivers installed
-- **CUDA issues**: Verify your PyTorch installation includes CUDA support
+- **"No voice/noise files found"**: Make sure you have audio files in the VOICE and NOISE directories
+  - You can create test examples with `python main.py preprocess --create-examples`
+  - The VOICE directory should contain recordings of the target person
+  - The NOISE directory should contain background noises and other people's voices
 
-## Technical Details
+// ...existing content...
 
-The system combines:
+```
 
-- Audio preprocessing with configurable window sizes
-- Convolutional neural network for mask generation
-- Spectrogram manipulation for voice isolation
-- GPU acceleration with parallel CUDA streams for maximum performance
-- Automatic sample count determination based on available GPU memory
-- Optional deeper model for maximizing GPU computational utilization
-- Mixed precision (FP16) training for modern NVIDIA GPUs
+These changes will:
 
-Supported audio formats: `.mp3` and `.wav`
+1. Make the `CachedSpectrogramDataset` initialization more robust by initializing thread control attributes early
+2. Add checks to create empty directories if they don't exist
+3. Add more helpful error messages when no audio files are found
+4. Add a feature to create example audio files if directories are empty
+5. Update the QuickStart guide with troubleshooting information
 
-Hardware recommendations:
-
-- CPU: Any modern multi-core processor
-- GPU: NVIDIA RTX 3060 or better for optimal performance
-- RAM: 8GB minimum, 16GB recommended
+The main issue was that either the NOISE directory was empty or didn't exist. With these changes, you'll get clearer error messages and have the option to create test examples.
+```

@@ -7,11 +7,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 VOICE_DIR = os.path.join(BASE_DIR, 'VOICE')
 NOISE_DIR = os.path.join(BASE_DIR, 'NOISE')
 OUTPUT_DIR = os.path.join(BASE_DIR, 'OUTPUT')
+CACHE_DIR = os.path.join(BASE_DIR, 'CACHE')  # New cache directory for preprocessed data
 
 # Create directories if they don't exist
 os.makedirs(VOICE_DIR, exist_ok=True)
 os.makedirs(NOISE_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 # GPU configurations
 USE_GPU = torch.cuda.is_available()
@@ -27,6 +29,12 @@ BATCH_SIZE = 64  # Batch size for GPU efficiency
 DATALOADER_WORKERS = 2  # Number of workers for data loading
 DATALOADER_PREFETCH = 4  # Increased prefetch factor for better GPU feeding
 DATALOADER_PIN_MEMORY = True  # Pin memory for faster CPU->GPU transfers
+
+# Data loading optimization
+USE_CACHED_DATA = True  # Enable using cached preprocessed data
+PRELOAD_SAMPLES = 100   # Number of samples to keep preloaded in memory
+CACHE_MEMORY_LIMIT = 2048  # Memory limit for cache in MB
+BACKGROUND_WORKERS = max(1, os.cpu_count() - 1)  # Use all CPU cores except one
 
 # Audio processing configurations
 SAMPLE_RATE = 16000  # Hz
@@ -52,4 +60,4 @@ VALIDATION_SPLIT = 0.2
 RANDOM_SEED = 42
 
 # Supported audio formats
-SUPPORTED_FORMATS = ['.mp3', '.wav']
+SUPPORTED_FORMATS = ['.mp3', '.wav', '.flac']  # Added FLAC support

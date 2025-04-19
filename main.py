@@ -82,6 +82,8 @@ def main():
                         help='Auto-detect optimal sample count based on GPU memory')
     train_parser.add_argument('--deep-model', action='store_true', default=False,
                         help='Use deeper model for higher GPU utilization')
+    train_parser.add_argument('--use-cache', action='store_true', default=False,
+                        help='Use cached preprocessed data for faster training')
     
     # Inference command
     inference_parser = subparsers.add_parser('isolate', help='Isolate voice in audio file')
@@ -90,6 +92,15 @@ def main():
     inference_parser.add_argument('--model', required=True, help='Path to trained model')
     inference_parser.add_argument('--gpu', action='store_true', default=USE_GPU,
                         help='Use GPU acceleration if available')
+    
+    # Preprocess command
+    preprocess_parser = subparsers.add_parser('preprocess', help='Preprocess audio files for faster training')
+    preprocess_parser.add_argument('--workers', type=int, default=os.cpu_count(),
+                          help='Number of worker threads for preprocessing')
+    preprocess_parser.add_argument('--convert', action='store_true',
+                          help='Convert WAV files to more efficient format')
+    preprocess_parser.add_argument('--create-examples', action='store_true',
+                          help='Create example audio files if directories are empty')
     
     # GPU Info command
     subparsers.add_parser('gpu-info', help='List available GPUs and their properties')
@@ -112,6 +123,8 @@ def main():
             sys.argv.append('--auto-detect-samples')
         if args.deep_model:
             sys.argv.append('--deep-model')
+        if args.use_cache:
+            sys.argv.append('--use-cache')
             
         train_main()
     elif args.command == 'isolate':
@@ -125,6 +138,18 @@ def main():
             sys.argv.append('--gpu')
             
         inference_main()
+    elif args.command == 'preprocess':
+        # Import and run preprocessing script
+        from preprocess_cache import main as preprocess_main
+        # Set sys.argv to pass arguments
+        sys.argv = [sys.argv[0]]
+        if args.workers:
+            sys.argv.extend(['--workers', str(args.workers)])
+        if args.convert:
+            sys.argv.append('--convert')
+        if args.create_examples:
+            sys.argv.append('--create-examples')
+        preprocess_main()
     elif args.command == 'gpu-info':
         list_gpus()
     else:
