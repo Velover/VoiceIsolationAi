@@ -10,6 +10,7 @@ from typing import Tuple, Optional, Dict, List
 import random
 import matplotlib.pyplot as plt
 import argparse
+from tqdm import tqdm
 
 from .config import (
     VOICE_DIR, NOISE_DIR, OUTPUT_DIR, BATCH_SIZE, EPOCHS, 
@@ -51,6 +52,44 @@ class SpectrogramDataset(Dataset):
             raise ValueError(f"No voice files found in {voice_dir}")
         if not self.noise_files:
             raise ValueError(f"No noise files found in {noise_dir}")
+            
+        print(f"Found {len(self.voice_files)} voice files and {len(self.noise_files)} noise files")
+        
+        # Pre-calculate a few samples to estimate processing time
+        print("Preparing sample dataset...")
+        sample_size = min(5, num_samples)
+        self.samples = []
+        
+        # Preprocess a small batch to estimate time
+        start_time = time.time()
+        for _ in range(sample_size):
+            self._create_sample()
+        avg_time = (time.time() - start_time) / sample_size
+        estimated_time = avg_time * num_samples
+        
+        print(f"Estimated time to prepare {num_samples} samples: {estimated_time:.1f} seconds")
+        
+    def _create_sample(self):
+        """Create a single training sample"""
+        # Select random files
+        voice_path = random.choice(self.voice_files)
+        
+        # 80% mix with noise, 20% just voice
+        if random.random() < 0.8:
+            noise_path = random.choice(self.noise_files)
+            mix_ratio = random.uniform(0.3, 0.7)
+        else:
+            noise_path = None
+            mix_ratio = 1.0
+            
+        try:
+            return self.preprocessor.create_training_example(
+                voice_path, noise_path, mix_ratio
+            )
+        except Exception as e:
+            print(f"Error creating sample from {voice_path}: {e}")
+            # Return a different sample
+            return self._create_sample()
     
     def __len__(self):
         return self.num_samples
@@ -65,22 +104,9 @@ class SpectrogramDataset(Dataset):
         Returns:
             Dictionary with mixed spectrogram and mask
         """
-        # Select random files
-        voice_path = random.choice(self.voice_files)
-        
-        # 80% mix with noise, 20% just voice
-        if random.random() < 0.8:
-            noise_path = random.choice(self.noise_files)
-            mix_ratio = random.uniform(0.3, 0.7)
-        else:
-            noise_path = None
-            mix_ratio = 1.0
-            
-        # Create example
         try:
-            mixed_spec, mask = self.preprocessor.create_training_example(
-                voice_path, noise_path, mix_ratio
-            )
+            # Create example on-the-fly for memory efficiency
+            mixed_spec, mask = self._create_sample()
             
             # Apply transformations if any
             if self.transform:
@@ -125,6 +151,7 @@ def train_model(
     # Initialize preprocessor
     preprocessor = AudioPreprocessor(window_size=window_size)
     
+    print(f"Creating dataset with {num_samples} samples...")
     # Create dataset
     dataset = SpectrogramDataset(
         voice_dir=VOICE_DIR,
@@ -138,6 +165,7 @@ def train_model(
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
     
+    print(f"Creating data loaders with batch size {batch_size}...")
     # Create dataloaders
     train_loader = DataLoader(
         train_dataset, 
@@ -171,13 +199,23 @@ def train_model(
     
     # Training loop
     print(f"Starting training for {epochs} epochs...")
-    for epoch in range(epochs):
+    progress_bar = tqdm(range(epochs), desc="Training", unit="epoch")
+    
+    for epoch in progress_bar:
         # Training phase
         model.train()
         train_loss = 0.0
         start_time = time.time()
         
-        for batch in train_loader:
+        # Create batch progress bar
+        batch_progress = tqdm(
+            train_loader, 
+            desc=f"Epoch {epoch+1}/{epochs}", 
+            leave=False,
+            unit="batch"
+        )
+        
+        for batch in batch_progress:
             mixed_spec = batch['mixed'].to(device)
             target_mask = batch['mask'].to(device)
             
@@ -192,6 +230,9 @@ def train_model(
             loss.backward()
             optimizer.step()
             
+            # Update progress bar with current loss
+            batch_progress.set_postfix(loss=f"{loss.item():.4f}")
+            
             train_loss += loss.item()
         
         # Validation phase
@@ -199,7 +240,14 @@ def train_model(
         val_loss = 0.0
         
         with torch.no_grad():
-            for batch in val_loader:
+            val_progress = tqdm(
+                val_loader, 
+                desc=f"Validating", 
+                leave=False,
+                unit="batch"
+            )
+            
+            for batch in val_progress:
                 mixed_spec = batch['mixed'].to(device)
                 target_mask = batch['mask'].to(device)
                 
@@ -209,6 +257,9 @@ def train_model(
                 # Compute loss
                 loss = loss_fn(pred_mask, target_mask)
                 val_loss += loss.item()
+                
+                # Update progress bar
+                val_progress.set_postfix(loss=f"{loss.item():.4f}")
         
         # Average losses
         avg_train_loss = train_loss / len(train_loader)
@@ -218,12 +269,13 @@ def train_model(
         history['train_loss'].append(avg_train_loss)
         history['val_loss'].append(avg_val_loss)
         
-        # Print progress
+        # Update epoch progress bar
         epoch_time = time.time() - start_time
-        print(f"Epoch {epoch+1}/{epochs} - "
-              f"Train Loss: {avg_train_loss:.4f} - "
-              f"Val Loss: {avg_val_loss:.4f} - "
-              f"Time: {epoch_time:.2f}s")
+        progress_bar.set_postfix({
+            'train_loss': f"{avg_train_loss:.4f}",
+            'val_loss': f"{avg_val_loss:.4f}", 
+            'time': f"{epoch_time:.2f}s"
+        })
     
     # Save model if path provided
     if model_save_path:

@@ -5,6 +5,7 @@ import argparse
 from typing import Optional, Tuple
 import numpy as np
 from pathlib import Path
+from tqdm import tqdm
 
 from .config import OUTPUT_DIR, N_FFT, HOP_LENGTH, SAMPLE_RATE, SPEC_TIME_DIM
 from .preprocessing import AudioPreprocessor
@@ -53,15 +54,18 @@ def process_audio(
         device: Device to run inference on
     """
     # Load model
+    print("Loading model...")
     model, window_size = load_model(model_path, device)
     
     # Initialize preprocessor
     preprocessor = AudioPreprocessor(window_size=window_size)
     
     # Load audio
+    print(f"Loading audio file: {input_path}")
     audio = preprocessor.load_audio(input_path)
     
     # Compute STFT
+    print("Computing STFT...")
     stft = preprocessor.compute_stft(audio)
     
     # Get magnitude and phase
@@ -72,6 +76,7 @@ def process_audio(
     orig_shape = magnitude.shape
     
     # Standardize spectrogram for model input
+    print("Processing audio with model...")
     magnitude_std = preprocessor.standardize_spectrogram(magnitude)
     
     # Prepare input for model (add batch and channel dimensions)
@@ -79,6 +84,7 @@ def process_audio(
     
     # Generate mask
     with torch.no_grad():
+        print("Generating isolation mask...")
         mask = model(model_input).squeeze(0).squeeze(0).cpu()
     
     # If spectrogram was padded, make sure to use only the relevant part of the mask
@@ -92,12 +98,14 @@ def process_audio(
         mask = temp_mask
     
     # Apply mask to isolate voice
+    print("Applying mask to isolate voice...")
     isolated_magnitude = magnitude * mask
     
     # Reconstruct complex STFT
     isolated_stft = isolated_magnitude * torch.exp(1j * phase)
     
     # Convert back to audio
+    print("Converting processed spectrogram back to audio...")
     isolated_audio = torch.istft(
         isolated_stft,
         n_fft=N_FFT,
@@ -108,13 +116,14 @@ def process_audio(
     
     # Save output
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    print(f"Saving processed audio to {output_path}")
     torchaudio.save(
         output_path,
         isolated_audio,
         SAMPLE_RATE
     )
     
-    print(f"Processed audio saved to {output_path}")
+    print(f"Processing complete: {input_path} → {output_path}")
 
 def main():
     """Main function for inference"""
