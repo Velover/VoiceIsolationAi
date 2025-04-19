@@ -7,13 +7,17 @@ This project trains an AI to isolate a specific person's voice from background n
 1. **Installation**:
 
    ```bash
-   pip install torch torchaudio librosa numpy tqdm
+   pip install torch torchaudio librosa numpy tqdm soundfile
    ```
 
 2. **Prepare data**:
 
    - Create a `VOICE` folder with the target person's voice recordings
    - Create a `NOISE` folder with other voices and background noise
+   - Preprocess the data (removes silence and prepares for training):
+     ```bash
+     python prepare_data.py
+     ```
 
 3. **Train a model**:
 
@@ -40,6 +44,32 @@ This project trains an AI to isolate a specific person's voice from background n
    # Process using specific model file
    python process.py --input noisy_audio.mp3 --output clean_voice.wav --model OUTPUT/voice_isolation_ai_100.pth
    ```
+
+## Data Preparation
+
+Before training, you can preprocess the data to remove silence and generate sample mixtures:
+
+```bash
+# Basic preprocessing (removes silence)
+python prepare_data.py
+
+# Keep silence in recordings
+python prepare_data.py --keep-silence
+
+# Generate sample mixtures for listening
+python prepare_data.py --generate-samples
+
+# Both keep silence and generate samples
+python prepare_data.py --keep-silence --generate-samples
+```
+
+This creates:
+
+- `PREPROCESSED_VOICE`: Processed voice files
+- `PREPROCESSED_NOISE`: Processed noise files
+- `SAMPLES`: Sample mixtures of voice and noise (if --generate-samples is used)
+
+The training automatically uses these preprocessed folders if they exist.
 
 ## Training Commands
 

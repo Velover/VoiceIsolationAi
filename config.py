@@ -56,6 +56,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Data paths
 VOICE_DIR = "VOICE"
 NOISE_DIR = "NOISE"
+PREPROCESSED_VOICE = "PREPROCESSED_VOICE"
+PREPROCESSED_NOISE = "PREPROCESSED_NOISE"
+SAMPLES_DIR = "SAMPLES"
 OUTPUT_DIR = "OUTPUT"
 
 # Model ID format
@@ -72,5 +75,6 @@ MAX_SNR = 20  # dB
 # Model parameters
 N_CHANNELS = 32  # Starting number of channels in U-Net
 
-# Create output directory if it doesn't exist
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Create directories if they don't exist
+for directory in [OUTPUT_DIR, PREPROCESSED_VOICE, PREPROCESSED_NOISE, SAMPLES_DIR]:
+    os.makedirs(directory, exist_ok=True)

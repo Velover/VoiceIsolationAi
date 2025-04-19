@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from model import UNet
 from dataset import VoiceSeparationDataset
 from config import *
+from prepare_data import prepare_training_data
 
 def train_model(window_size):
     # Get window parameters
@@ -27,9 +28,15 @@ def train_model(window_size):
     model = UNet().to(DEVICE)
     print(f"Training on {DEVICE}")
     
+    # Check if preprocessed data exists, if not prepare it
+    if not os.path.exists(PREPROCESSED_VOICE) or not os.listdir(PREPROCESSED_VOICE) or \
+       not os.path.exists(PREPROCESSED_NOISE) or not os.listdir(PREPROCESSED_NOISE):
+        print("Preprocessed data not found. Preparing training data...")
+        prepare_training_data(remove_silence_flag=True)
+    
     # Create dataset and dataloader
     dataset = VoiceSeparationDataset(
-        VOICE_DIR, NOISE_DIR, 
+        PREPROCESSED_VOICE, PREPROCESSED_NOISE, 
         window_size_ms=window_size_ms,
         window_samples=window_samples,
         hop_length=hop_length,
@@ -122,8 +129,15 @@ def main():
     parser.add_argument('--window-size', type=str, choices=['SMALL', 'MEDIUM', 'LARGE', 'XLARGE'], 
                       default='SMALL', help='Window size for training (default: SMALL)')
     parser.add_argument('--all', action='store_true', help='Train all window size models')
+    parser.add_argument('--prepare-only', action='store_true', help='Only prepare training data, don\'t train')
     
     args = parser.parse_args()
+    
+    # Check if only data preparation is requested
+    if args.prepare_only:
+        print("Preparing training data...")
+        prepare_training_data(remove_silence_flag=True)
+        return
     
     if args.all:
         # Train all window sizes

@@ -9,9 +9,10 @@ This documentation provides detailed instructions on how to use the Voice Isolat
 3. [Project Structure](#project-structure)
 4. [Configuration Guide](#configuration-guide)
 5. [Window Size Options](#window-size-options)
-6. [Training Guide](#training-guide)
-7. [Processing Guide](#processing-guide)
-8. [Troubleshooting](#troubleshooting)
+6. [Data Preparation](#data-preparation)
+7. [Training Guide](#training-guide)
+8. [Processing Guide](#processing-guide)
+9. [Troubleshooting](#troubleshooting)
 
 ## Project Overview
 
@@ -33,6 +34,7 @@ This project uses deep learning to isolate a specific person's voice from backgr
 - torchaudio
 - numpy
 - tqdm
+- soundfile
 
 ### Setup
 
@@ -40,7 +42,7 @@ This project uses deep learning to isolate a specific person's voice from backgr
 2. Install dependencies:
 
 ```bash
-pip install torch torchaudio librosa numpy tqdm
+pip install torch torchaudio librosa numpy tqdm soundfile
 ```
 
 3. Prepare your data folders:
@@ -52,12 +54,16 @@ pip install torch torchaudio librosa numpy tqdm
 ```
 ├── config.py         # Configuration settings
 ├── utils.py          # Audio processing utilities
-├── dataset.py        # Dataset for training
+├── dataset.py        # Dataset for training data preparation
 ├── model.py          # U-Net model architecture
 ├── train.py          # Training script
 ├── process.py        # Audio processing script
-├── VOICE/            # Target voice recordings
-├── NOISE/            # Other voices and noise
+├── prepare_data.py   # Data preprocessing script
+├── VOICE/            # Target voice recordings (raw)
+├── NOISE/            # Other voices and noise (raw)
+├── PREPROCESSED_VOICE/ # Processed voice files with silence removed
+├── PREPROCESSED_NOISE/ # Processed noise files with silence removed
+├── SAMPLES/          # Generated sample mixtures for testing
 └── OUTPUT/           # Trained models and outputs
 ```
 
@@ -223,6 +229,50 @@ To process with a specific window size model:
 python process.py --input noisy.mp3 --output clean.wav --window-size LARGE
 ```
 
+## Data Preparation
+
+Before training, you'll want to preprocess your audio data to remove silence and optionally generate sample mixtures to verify the quality of your dataset.
+
+### Preprocessing Steps
+
+The system includes a dedicated preprocessing script that:
+
+1. Removes silence from audio files (can be disabled)
+2. Normalizes audio formats and sample rates
+3. Can generate sample mixtures with various SNR levels for testing
+
+### Running Preprocessing
+
+```bash
+# Basic preprocessing (removes silence)
+python prepare_data.py
+
+# Keep silence in recordings
+python prepare_data.py --keep-silence
+
+# Generate sample mixtures for listening
+python prepare_data.py --generate-samples
+
+# Both keep silence and generate samples
+python prepare_data.py --keep-silence --generate-samples
+```
+
+This creates:
+
+- `PREPROCESSED_VOICE`: Contains processed voice files with silence removed
+- `PREPROCESSED_NOISE`: Contains processed noise files with silence removed
+- `SAMPLES`: Contains sample mixtures of voice and noise at different SNR levels (if --generate-samples is used)
+
+### Silence Removal
+
+The silence removal algorithm:
+
+- Identifies segments with RMS energy below a threshold (-40dB by default)
+- Removes segments of silence longer than a minimum duration (0.3s by default)
+- Concatenates the remaining audio segments
+
+This significantly improves the quality of training data by ensuring the model only learns from relevant audio content.
+
 ## Training Guide
 
 ### Prepare Your Data
@@ -234,25 +284,43 @@ python process.py --input noisy.mp3 --output clean.wav --window-size LARGE
    - Supported formats: mp3, wav, webm
 
 2. **NOISE folder**: Add recordings of:
+
    - Other people talking (especially those who typically appear in recordings with the target person)
    - Ambient noise from the environments where recordings typically happen
    - Any other noise sources that need to be removed
    - Supported formats: mp3, wav, webm
+
+3. **Preprocess the data**:
+   ```bash
+   python prepare_data.py
+   ```
+   This creates the preprocessed folders that will be used for training.
 
 ### Start Training
 
 Run the training script:
 
 ```bash
+# Train with default window size (SMALL - 30ms)
 python train.py
+
+# Train with specific window size
+python train.py --window-size MEDIUM
+
+# Train all window size variants
+python train.py --all
+
+# Only prepare the data without training
+python train.py --prepare-only
 ```
 
 The script will:
 
-1. Mix voice and noise files with random SNRs to create training examples
-2. Train the U-Net model to generate masks
-3. Save checkpoints every 10 epochs in the OUTPUT directory
-4. Save the final model as `voice_separation_model.pth`
+1. Check if preprocessed data exists, and create it if needed
+2. Mix voice and noise files with random SNRs to create training examples
+3. Train the U-Net model to generate masks
+4. Save checkpoints every 10 epochs in the OUTPUT directory
+5. Save the final model as `voice_isolation_ai_{window_size}.pth`
 
 ### Training Tips
 
@@ -326,6 +394,7 @@ For advanced users who want to modify the model architecture or training process
 - `model.py`: Contains the U-Net architecture. You can modify it to experiment with different architectures.
 - `dataset.py`: Contains the dataset logic. You can modify it to change how training examples are generated.
 - `utils.py`: Contains audio processing functions. You can modify these to change how audio is processed.
+- `prepare_data.py`: Contains the preprocessing logic. You can modify it to change how silence is detected and removed.
 
 ## Performance Expectations
 
