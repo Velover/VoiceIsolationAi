@@ -61,22 +61,51 @@ class UNet(nn.Module):
         
         # Decoder
         dec4 = self.upconv4(bottleneck)
-        dec4 = torch.cat((dec4, enc4), dim=1)
+        # Crop enc4 to match dec4 size
+        enc4_cropped = self.crop(enc4, dec4)
+        dec4 = torch.cat((dec4, enc4_cropped), dim=1)
         dec4 = self.decoder4(dec4)
         
         dec3 = self.upconv3(dec4)
-        dec3 = torch.cat((dec3, enc3), dim=1)
+        # Crop enc3 to match dec3 size
+        enc3_cropped = self.crop(enc3, dec3)
+        dec3 = torch.cat((dec3, enc3_cropped), dim=1)
         dec3 = self.decoder3(dec3)
         
         dec2 = self.upconv2(dec3)
-        dec2 = torch.cat((dec2, enc2), dim=1)
+        # Crop enc2 to match dec2 size
+        enc2_cropped = self.crop(enc2, dec2)
+        dec2 = torch.cat((dec2, enc2_cropped), dim=1)
         dec2 = self.decoder2(dec2)
         
         dec1 = self.upconv1(dec2)
-        dec1 = torch.cat((dec1, enc1), dim=1)
+        # Crop enc1 to match dec1 size
+        enc1_cropped = self.crop(enc1, dec1)
+        dec1 = torch.cat((dec1, enc1_cropped), dim=1)
         dec1 = self.decoder1(dec1)
         
         # Final layer
         mask = self.sigmoid(self.final_conv(dec1))
         
         return mask
+    
+    def crop(self, encoder_feature, decoder_feature):
+        """
+        Center-crop encoder_feature to match the size of decoder_feature.
+        """
+        if encoder_feature.size() == decoder_feature.size():
+            return encoder_feature
+            
+        _, _, h_e, w_e = encoder_feature.size()
+        _, _, h_d, w_d = decoder_feature.size()
+        
+        # Crop height and width
+        h_diff = h_e - h_d
+        w_diff = w_e - w_d
+        
+        if h_diff > 0:
+            encoder_feature = encoder_feature[:, :, h_diff//2:h_diff//2+h_d, :]
+        if w_diff > 0:
+            encoder_feature = encoder_feature[:, :, :, w_diff//2:w_diff//2+w_d]
+        
+        return encoder_feature

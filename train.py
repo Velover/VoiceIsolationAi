@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
 import argparse
+import torch.nn.functional as F
 
 from model import UNet
 from dataset import VoiceSeparationDataset
@@ -53,11 +54,31 @@ def train_model(window_size):
                 mixed_mag = data['mixed_mag'].to(DEVICE)
                 target_mask = data['target_mask'].to(DEVICE)
                 
+                # Ensure input has the right dimensions
+                if mixed_mag.dim() == 3:  # [batch_size, frequency_bins, time_frames]
+                    mixed_mag = mixed_mag.unsqueeze(1)  # Add channel dimension
+                
                 # Zero the parameter gradients
                 optimizer.zero_grad()
                 
                 # Forward pass
                 predicted_mask = model(mixed_mag)
+                
+                # Print shapes for debugging (first batch only)
+                if i == 0 and epoch == 0:
+                    print(f"Mixed mag shape: {mixed_mag.shape}")
+                    print(f"Predicted mask shape: {predicted_mask.shape}")
+                    print(f"Target mask shape: {target_mask.shape}")
+                
+                # Resize target mask to match predicted mask size exactly
+                if target_mask.shape != predicted_mask.shape:
+                    print(f"Resizing target mask from {target_mask.shape} to {predicted_mask.shape}")
+                    target_mask = F.interpolate(
+                        target_mask, 
+                        size=(predicted_mask.shape[2], predicted_mask.shape[3]),
+                        mode='bilinear', 
+                        align_corners=False
+                    )
                 
                 # Calculate loss
                 loss = criterion(predicted_mask, target_mask)

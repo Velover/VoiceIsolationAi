@@ -100,10 +100,26 @@ class VoiceSeparationDataset(Dataset):
         target_mask = np.divide(clean_mag, mixed_mag + 1e-10)  # Avoid division by zero
         target_mask = np.clip(target_mask, 0, 1)
         
+        # Make sure both have same dimensions - crucial for U-Net
+        # Make dimensions even to avoid issues with max pooling and upsampling
+        freq_dim = min(mixed_mag.shape[0], target_mask.shape[0])
+        time_dim = min(mixed_mag.shape[1], target_mask.shape[1])
+        
+        # Ensure dimensions are even (for clean pooling operations)
+        freq_dim = freq_dim - (freq_dim % 2)
+        time_dim = time_dim - (time_dim % 8)  # Multiple of 8 for 3 pooling operations
+        
+        mixed_mag = mixed_mag[:freq_dim, :time_dim]
+        target_mask = target_mask[:freq_dim, :time_dim]
+        mixed_phase = mixed_phase[:freq_dim, :time_dim]
+        
         # Convert to tensors
         mixed_mag = torch.tensor(mixed_mag, dtype=torch.float32)
         target_mask = torch.tensor(target_mask, dtype=torch.float32)
         mixed_phase = torch.tensor(mixed_phase, dtype=torch.float32)
+        
+        # Add channel dimension to target_mask to match model output
+        target_mask = target_mask.unsqueeze(0)
         
         if self.transform:
             mixed_mag = self.transform(mixed_mag)

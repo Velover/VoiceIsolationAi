@@ -2,6 +2,7 @@ import os
 import argparse
 import torch
 import numpy as np
+import torch.nn.functional as F
 from model import UNet
 from utils import load_audio, prepare_spectrograms, reconstruct_signal, save_audio
 from config import *
@@ -37,6 +38,21 @@ def process_audio(model, input_file, output_file, window_params=None):
     model.eval()
     with torch.no_grad():
         mask = model(magnitude_tensor).squeeze().cpu().numpy()
+    
+    # Handle potential size mismatch
+    if mask.shape != magnitude.shape:
+        print(f"Note: Mask shape {mask.shape} differs from magnitude shape {magnitude.shape}")
+        print("Resizing mask to match magnitude...")
+        
+        # Convert back to tensor for resizing
+        mask_tensor = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0)
+        mask_tensor = F.interpolate(
+            mask_tensor,
+            size=(magnitude.shape[0], magnitude.shape[1]),
+            mode='bilinear',
+            align_corners=False
+        )
+        mask = mask_tensor.squeeze().numpy()
     
     # Apply mask to isolate voice
     enhanced_magnitude = magnitude * mask
