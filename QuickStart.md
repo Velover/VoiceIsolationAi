@@ -23,25 +23,29 @@ A deep learning system for isolating a specific person's voice from background n
 ### Training the Model
 
 ```bash
-# Basic training with default parameters
+# Basic training with default parameters (auto-detects optimal sample count)
 python main.py train
 
 # Advanced training with custom parameters
-python main.py train --window-size medium --epochs 50 --batch-size 32 --samples 2000
+python main.py train --window-size medium --epochs 50 --batch-size 64
 
-# GPU-accelerated training (recommended for RTX 3060)
-python main.py train --gpu --mixed-precision
-python main.py train --gpu --mixed-precision --window-size medium --epochs 50 --batch-size 32 --samples 2000
+# Maximum GPU utilization with auto-detection (recommended)
+python main.py train --gpu --mixed-precision --deep-model
+
+# Custom configuration with all options
+python main.py train --gpu --mixed-precision --deep-model --window-size medium --epochs 50 --batch-size 64 --auto-detect-samples
 ```
 
 Training parameters:
 
 - `--window-size`: Processing window size (`small`=30ms, `medium`=500ms, `large`=2s)
 - `--epochs`: Number of training epochs (default: 50)
-- `--batch-size`: Batch size (default: 32)
-- `--samples`: Number of training samples to generate (default: 2000)
-- `--gpu`: Enable GPU acceleration for faster training (up to 10x speedup)
+- `--batch-size`: Batch size (default: 64)
+- `--samples`: Number of training samples to generate (0 for auto-detect)
+- `--gpu`: Enable GPU acceleration for faster training
 - `--mixed-precision`: Use FP16 for additional performance on compatible GPUs
+- `--auto-detect-samples`: Automatically determine optimal sample count based on GPU memory
+- `--deep-model`: Use deeper model architecture for maximizing GPU computational utilization
 
 The trained model will be saved in the `OUTPUT` directory.
 
@@ -57,6 +61,25 @@ python main.py isolate --input recording.wav --model OUTPUT/model.pth --output i
 # Use GPU for faster processing
 python main.py isolate --input recording.wav --model OUTPUT/model.pth --gpu
 ```
+
+### Optimizing GPU Performance
+
+For best GPU utilization:
+
+```bash
+# Check GPU information and performance
+python main.py gpu-info
+
+# Run training with optimal GPU settings
+python main.py train --gpu --mixed-precision --deep-model
+```
+
+The system will:
+
+1. Auto-detect the optimal number of training samples based on your GPU memory
+2. Use CUDA streams for parallel data transfer and computation
+3. Utilize a deeper model with more computations for higher GPU utilization
+4. Apply all performance optimizations automatically
 
 ## Project Overview
 
@@ -86,17 +109,17 @@ For best results:
 
 ### Training Tips
 
-- Start with the `medium` window size for a good balance of context and detail
-- For very noisy environments, increase the number of training samples
+- The system now automatically determines the optimal number of samples for your hardware
+- Use the `--deep-model` flag to fully utilize GPU computational power
+- For very noisy environments, manually increase the number of training samples
 - If the model struggles with certain types of noise, add more similar noise samples to the training data
-- Use GPU acceleration (`--gpu`) for significantly faster sample creation and training
-- On RTX 3060 or better GPUs, enable mixed precision (`--mixed-precision`) for even faster processing
 
 ### Troubleshooting
 
 - **Poor isolation results**: Try re-training with more diverse noise samples
 - **Training errors**: Ensure audio files are properly formatted and not corrupted
-- **Out of memory errors**: Reduce batch size or use a smaller window size
+- **Out of memory errors**: Let the auto-detection handle sample count, or manually reduce batch size
+- **Low GPU utilization**: Use the `--deep-model` flag to increase computational workload
 - **GPU-related errors**: Make sure you have the latest GPU drivers installed
 - **CUDA issues**: Verify your PyTorch installation includes CUDA support
 
@@ -107,7 +130,9 @@ The system combines:
 - Audio preprocessing with configurable window sizes
 - Convolutional neural network for mask generation
 - Spectrogram manipulation for voice isolation
-- GPU acceleration for both sample creation and model training
+- GPU acceleration with parallel CUDA streams for maximum performance
+- Automatic sample count determination based on available GPU memory
+- Optional deeper model for maximizing GPU computational utilization
 - Mixed precision (FP16) training for modern NVIDIA GPUs
 
 Supported audio formats: `.mp3` and `.wav`

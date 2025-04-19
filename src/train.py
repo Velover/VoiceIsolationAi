@@ -17,17 +17,20 @@ from .config import (
     VOICE_DIR, NOISE_DIR, OUTPUT_DIR, BATCH_SIZE, EPOCHS, 
     LEARNING_RATE, N_FFT, VALIDATION_SPLIT, RANDOM_SEED,
     USE_GPU, GPU_DEVICE, MIXED_PRECISION, CUDNN_BENCHMARK, GPU_MEMORY_FRACTION,
-    DATALOADER_WORKERS, DATALOADER_PREFETCH, DATALOADER_PIN_MEMORY
+    DATALOADER_WORKERS, DATALOADER_PREFETCH, DATALOADER_PIN_MEMORY, AUTO_DETECT_SAMPLES
 )
 from .preprocessing import AudioPreprocessor, get_audio_files
-from .model import VoiceIsolationModel, MaskedLoss
+from .model import VoiceIsolationModel, MaskedLoss, VoiceIsolationModelDeep
 
 # Import GPU utilities if available
 try:
-    from .gpu_utils import GPUMonitor, optimize_for_gpu
+    from .gpu_utils import GPUMonitor, optimize_for_gpu, optimize_gpu_utilization, estimate_optimal_samples
 except ImportError:
     GPUMonitor = None
     optimize_for_gpu = lambda: None
+    optimize_gpu_utilization = lambda: None
+    def estimate_optimal_samples(*args, **kwargs):
+        return 2000
 
 # Set random seed for reproducibility
 torch.manual_seed(RANDOM_SEED)
@@ -179,7 +182,9 @@ def train_model(
     num_samples: int = 2000,
     model_save_path: Optional[str] = None,
     use_gpu: bool = USE_GPU,
-    use_mixed_precision: bool = MIXED_PRECISION
+    use_mixed_precision: bool = MIXED_PRECISION,
+    auto_detect_samples: bool = AUTO_DETECT_SAMPLES,
+    use_deep_model: bool = False
 ) -> Tuple[nn.Module, Dict]:
     """
     Train the voice isolation model.
@@ -193,6 +198,8 @@ def train_model(
         model_save_path: Path to save the model (optional)
         use_gpu: Whether to use GPU acceleration
         use_mixed_precision: Whether to use mixed precision training
+        auto_detect_samples: Auto-detect optimal sample count
+        use_deep_model: Use deeper model for higher GPU utilization
         
     Returns:
         Tuple of (trained model, training history)
@@ -207,6 +214,9 @@ def train_model(
         # Clear GPU cache before starting
         torch.cuda.empty_cache()
         gc.collect()  # Also collect Python garbage
+        
+        # Additional GPU optimization for maximum utilization
+        optimize_gpu_utilization()
         
         # Test tensor creation
         test = torch.ones(1, device=device)
@@ -233,15 +243,40 @@ def train_model(
             print("⚠️ Falling back to CPU...")
             device = torch.device("cpu")
             use_gpu = False
+            auto_detect_samples = False
     else:
         if not torch.cuda.is_available() and use_gpu:
             print("❌ GPU requested but no CUDA-compatible GPU detected!")
         device = torch.device("cpu")
         use_gpu = False
+        auto_detect_samples = False
         print("\n=== RUNNING ON CPU ===")
     
     # Initialize preprocessor with GPU support
     preprocessor = AudioPreprocessor(window_size=window_size, use_gpu=use_gpu)
+    
+    # Get voice and noise files
+    voice_files = get_audio_files(VOICE_DIR)
+    noise_files = get_audio_files(NOISE_DIR)
+    
+    # Auto-detect optimal sample count if requested and possible
+    if auto_detect_samples and use_gpu:
+        print("\n=== AUTO-DETECTING OPTIMAL SAMPLE COUNT ===")
+        estimated_samples = estimate_optimal_samples(
+            preprocessor=preprocessor,
+            voice_files=voice_files, 
+            noise_files=noise_files,
+            batch_size=batch_size
+        )
+        
+        # Update sample count if auto-detection is successful
+        if estimated_samples > 0:
+            print(f"Auto-detected optimal sample count: {estimated_samples}")
+            print(f"Original requested samples: {num_samples}")
+            
+            # Use the smaller of the two values to be safe
+            num_samples = min(num_samples, estimated_samples) if num_samples > 0 else estimated_samples
+            print(f"Using sample count: {num_samples}")
     
     print(f"\n=== CREATING DATASET ({num_samples} SAMPLES) ===")
     # Create dataset with GPU support
@@ -290,7 +325,12 @@ def train_model(
     
     print(f"\n=== INITIALIZING MODEL ===")
     # Initialize model, loss, and optimizer
-    model = VoiceIsolationModel(n_fft=N_FFT)
+    if use_deep_model:
+        print("Using deeper model for higher GPU utilization")
+        model = VoiceIsolationModelDeep(n_fft=N_FFT)
+    else:
+        model = VoiceIsolationModel(n_fft=N_FFT)
+    
     loss_fn = MaskedLoss()
     
     # Use AdamW optimizer for better performance
@@ -520,6 +560,10 @@ def main():
                         help='Use GPU acceleration if available')
     parser.add_argument('--mixed-precision', action='store_true', default=MIXED_PRECISION,
                         help='Use mixed precision training (FP16) for faster computation')
+    parser.add_argument('--auto-detect-samples', action='store_true', default=AUTO_DETECT_SAMPLES,
+                        help='Auto-detect optimal sample count for training')
+    parser.add_argument('--deep-model', action='store_true', default=False,
+                        help='Use deeper model for higher GPU utilization')
     
     args = parser.parse_args()
     
@@ -536,7 +580,9 @@ def main():
         num_samples=args.samples,
         model_save_path=model_save_path,
         use_gpu=args.gpu,
-        use_mixed_precision=args.mixed_precision
+        use_mixed_precision=args.mixed_precision,
+        auto_detect_samples=args.auto_detect_samples,
+        use_deep_model=args.deep_model  # Use args.deep_model here
     )
     
     # Plot training history

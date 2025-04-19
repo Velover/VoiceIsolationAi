@@ -72,12 +72,16 @@ def main():
                         help='Batch size for training')
     train_parser.add_argument('--epochs', type=int, default=50, 
                         help='Number of training epochs')
-    train_parser.add_argument('--samples', type=int, default=2000, 
-                        help='Number of training samples to generate')
+    train_parser.add_argument('--samples', type=int, default=0,  # Changed to 0 to favor auto-detection
+                        help='Number of training samples to generate (0 for auto-detect)')
     train_parser.add_argument('--gpu', action='store_true', default=USE_GPU,
                         help='Use GPU acceleration if available')
     train_parser.add_argument('--mixed-precision', action='store_true', default=MIXED_PRECISION,
                         help='Use mixed precision training for faster computation')
+    train_parser.add_argument('--auto-detect-samples', action='store_true', default=True,
+                        help='Auto-detect optimal sample count based on GPU memory')
+    train_parser.add_argument('--deep-model', action='store_true', default=False,
+                        help='Use deeper model for higher GPU utilization')
     
     # Inference command
     inference_parser = subparsers.add_parser('isolate', help='Isolate voice in audio file')
@@ -104,6 +108,10 @@ def main():
             sys.argv.append('--gpu')
         if args.mixed_precision:
             sys.argv.append('--mixed-precision')
+        if args.auto_detect_samples:
+            sys.argv.append('--auto-detect-samples')
+        if args.deep_model:
+            sys.argv.append('--deep-model')
             
         train_main()
     elif args.command == 'isolate':

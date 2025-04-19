@@ -6,6 +6,7 @@ import time
 import threading
 from typing import Dict, List
 import os
+import random
 
 class GPUMonitor:
     """
@@ -157,3 +158,110 @@ def optimize_for_gpu():
     
     # Set benchmark mode for optimized convolutions
     torch.backends.cudnn.benchmark = True
+
+def estimate_optimal_samples(preprocessor, voice_files, noise_files, batch_size=64, memory_headroom=0.2) -> int:
+    """
+    Estimate the optimal number of samples based on hardware resources.
+    
+    Args:
+        preprocessor: AudioPreprocessor instance
+        voice_files: List of voice audio files
+        noise_files: List of noise audio files
+        batch_size: Training batch size
+        memory_headroom: Fraction of memory to leave free (0.0-1.0)
+        
+    Returns:
+        Estimated optimal number of samples
+    """
+    if not torch.cuda.is_available():
+        print("GPU not available, using default sample count")
+        return 2000  # Default for CPU
+    
+    # Get total GPU memory
+    total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**2  # MB
+    
+    # Create a small batch of samples to measure memory usage
+    print("Testing memory usage per sample...")
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    
+    try:
+        # Generate test samples
+        test_samples = 10
+        start_memory = torch.cuda.memory_allocated() / 1024**2
+        
+        for i in range(test_samples):
+            # Get random voice and noise files
+            voice_path = random.choice(voice_files)
+            noise_path = random.choice(noise_files)
+            
+            # Create a sample
+            preprocessor.create_training_example(voice_path, noise_path)
+            print(f"  Created test sample {i+1}/{test_samples}", end="\r")
+        
+        end_memory = torch.cuda.memory_allocated() / 1024**2
+        peak_memory = torch.cuda.max_memory_allocated() / 1024**2
+        
+        # Calculate memory per sample
+        memory_per_sample = (peak_memory - start_memory) / test_samples
+        
+        # Estimate the memory needed for training
+        # We consider: 
+        # 1. Memory for all samples
+        # 2. Memory for the model
+        # 3. Memory for optimizer states (roughly 2x model size)
+        # 4. Memory for batches during training
+        # 5. Memory for gradients and forward pass
+        
+        # We estimate model + optimizer + batch memory as roughly 1000MB
+        training_overhead = 1000  
+        
+        # Calculate available memory considering headroom
+        available_memory = total_memory * (1 - memory_headroom) - training_overhead
+        
+        # Calculate maximum samples that would fit in memory
+        max_samples = int(available_memory / memory_per_sample)
+        
+        # Make it divisible by batch size for efficiency
+        max_samples = (max_samples // batch_size) * batch_size
+        
+        # Apply reasonable limits
+        max_samples = max(1000, min(10000, max_samples))
+        
+        print(f"\nMemory analysis:")
+        print(f"  Total GPU memory: {total_memory:.0f} MB")
+        print(f"  Memory per sample: {memory_per_sample:.2f} MB")
+        print(f"  Estimated maximum samples: {max_samples}")
+        
+        return max_samples
+        
+    except Exception as e:
+        print(f"Error estimating sample capacity: {e}")
+        return 2000  # Default fallback value
+
+def optimize_gpu_utilization():
+    """
+    Optimize settings to maximize GPU computational utilization.
+    """
+    if not torch.cuda.is_available():
+        return
+    
+    # Set benchmark mode for optimized kernel selection
+    torch.backends.cudnn.benchmark = True
+    
+    # Enable TensorFloat32 on Ampere GPUs for faster computation
+    if torch.cuda.get_device_capability(0)[0] >= 8:
+        torch.set_float32_matmul_precision('high')
+    
+    # Enable tensor cores for mixed precision
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    
+    # Set optimal threading configuration
+    if hasattr(torch, 'set_num_threads'):
+        # Use fewer CPU threads when GPU is primary compute device
+        torch.set_num_threads(4)
+    
+    # Set environment variables for faster parallelism
+    os.environ['OMP_NUM_THREADS'] = '4'
+    os.environ['MKL_NUM_THREADS'] = '4'

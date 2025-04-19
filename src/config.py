@@ -18,13 +18,14 @@ USE_GPU = torch.cuda.is_available()
 GPU_DEVICE = 0
 MIXED_PRECISION = True  # Use mixed precision training (FP16) for faster computation
 CUDNN_BENCHMARK = True  # Set to True for fixed-size inputs for better performance
-GPU_MEMORY_FRACTION = 0.85 
+GPU_MEMORY_FRACTION = 0.90  # Increased to 90% for maximum utilization
 FORCE_CPU_DATALOADING = True  # Force loading data on CPU regardless of GPU availability
+AUTO_DETECT_SAMPLES = True  # Auto-detect optimal sample count based on hardware
 
 # Performance tuning
-BATCH_SIZE = 64  # Increased from 32 to utilize more GPU memory
+BATCH_SIZE = 64  # Batch size for GPU efficiency
 DATALOADER_WORKERS = 2  # Number of workers for data loading
-DATALOADER_PREFETCH = 2  # Number of batches to prefetch
+DATALOADER_PREFETCH = 4  # Increased prefetch factor for better GPU feeding
 DATALOADER_PIN_MEMORY = True  # Pin memory for faster CPU->GPU transfers
 
 # Audio processing configurations
