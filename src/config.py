@@ -49,7 +49,7 @@ DEFAULT_WINDOW_SIZE = 'medium'  # Default window size choice
 N_FFT = 512  # Number of frequency bins for FFT
 HOP_LENGTH = 128  # Hop length for STFT
 N_MELS = 64  # Number of Mel bands
-LEARNING_RATE = 0.001
+LEARNING_RATE = 0.005
 EPOCHS = 50
 
 # Fixed spectrogram time dimension for consistent batch processing
