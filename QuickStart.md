@@ -185,6 +185,21 @@ This will display all trained models with their names and metadata.
   - The VOICE directory should contain recordings of the target person
   - The NOISE directory should contain background noises and other people's voices
 
+- **Device mismatch errors**: If you see errors like "Expected all tensors to be on the same device":
+
+  - This is usually caused by CUDA/CPU device mismatch during processing
+  - Try updating to the latest version of the code which includes fixes for this issue
+  - As a workaround, you can process without GPU: `python main.py isolate --input YOUR_FILE.wav --model YOUR_MODEL.pth --no-gpu`
+  - For batch processing: `python main.py isolate-batch --model YOUR_MODEL.pth --no-gpu`
+
+- **Silent or very quiet output**: If the isolated output is silent or too quiet:
+
+  - Make sure your model was trained on similar audio conditions
+  - Use the `--debug` flag to see the mask behavior
+  - Try processing with `python main.py isolate --input YOUR_FILE.wav --model YOUR_MODEL.pth --debug`
+  - Check the generated mask visualization to see if the model is recognizing voice segments
+  - If the masks are consistently low (below 0.2), your model needs retraining with better voice samples
+
 - **Poor voice isolation quality**: Try these approaches:
   - Ensure your VOICE directory contains clear samples of only the target voice
   - Use the `--debug` flag when processing to analyze mask behavior

@@ -60,7 +60,7 @@ VALIDATION_SPLIT = 0.25  # Increased from 0.2 for better generalization
 RANDOM_SEED = 42
 
 # Add early stopping configuration
-EARLY_STOPPING_PATIENCE = 15  # Stop if no improvement for 15 epochs
+EARLY_STOPPING_PATIENCE = 100  # Stop if no improvement for 15 epochs
 EARLY_STOPPING_MIN_DELTA = 0.001  # Minimum improvement to be considered significant
 
 # Checkpoint frequency (save every N epochs)

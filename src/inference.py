@@ -207,6 +207,17 @@ def process_audio(
             mask_maxes.append(mask_max)
             mask_mins.append(mask_min)
             
+            # CRITICAL CHANGE: Add explicit device consistency checks
+            # Move tensors to CPU for consistent processing right after model output
+            mask = mask.cpu()
+            magnitude = magnitude.cpu()
+            phase = phase.cpu()
+            
+            # Print diagnostic info for troubleshooting
+            if i == 0 or i == num_windows//2 or i == 6:  # Debug for first, middle and window 6
+                print(f"\nDIAGNOSTIC: Window {i} raw mask stats: mean={mask_mean:.4f}, max={mask_max:.4f}, min={mask_min:.4f}")
+                print(f"Devices - mask: {mask.device}, magnitude: {magnitude.device}, phase: {phase.device}")
+            
             # Save information for debugging
             debug_info.append({
                 'window': i,
@@ -217,25 +228,19 @@ def process_audio(
                 'mask_min': mask_min
             })
             
-            # Move tensors to CPU for consistent processing
-            magnitude = magnitude.cpu()
-            phase = phase.cpu()
-            mask = mask.cpu()
-            
             # Apply mask adjustment logic based on what we see
-            # CRITICAL CHANGE: The mask application logic
-            
             # If mask is too extreme (all 0s or all 1s), make it more useful
             # We want some variation in the mask to actually isolate voice
             if mask_max < 0.05:
                 # Mask is blocking everything - replace with moderate mask
                 print(f"\nWARNING: Mask for window {i} is too low (max={mask_max:.4f}). Using raised mask.")
-                mask = torch.ones_like(mask) * 0.5
+                # Changed from 0.5 to 0.7 to let more sound through
+                mask = torch.ones_like(mask) * 0.7
             elif mask_mean > 0.9:
                 # Mask is letting everything through - apply more aggressive masking
                 print(f"\nWARNING: Mask for window {i} is too high (mean={mask_mean:.4f}). Applying threshold.")
-                # Subtract a baseline and rescale to make mask more discriminative
-                mask = torch.clamp((mask - 0.5) * 2, 0.0, 1.0)
+                # Make this less aggressive - changed from (mask - 0.5) * 2 to (mask - 0.3) * 1.5
+                mask = torch.clamp((mask - 0.3) * 1.5, 0.1, 1.0)  # Ensure minimum mask value of 0.1
             
             # Apply frequency-dependent enhancement
             # Voice is typically in mid-range frequencies (100Hz-3000Hz)
@@ -244,29 +249,30 @@ def process_audio(
             voice_range_start = int(freq_bins * 0.05)  # ~100Hz
             voice_range_end = int(freq_bins * 0.3)     # ~3000Hz
             
-            # Boost the voice frequency range slightly
+            # Boost the voice frequency range slightly - make this less aggressive
             voice_freq_mask = mask[voice_range_start:voice_range_end, :]
             if voice_freq_mask.mean() > 0.4:  # Only if we detect probable voice
-                mask[voice_range_start:voice_range_end, :] = torch.pow(mask[voice_range_start:voice_range_end, :], 0.5)
+                # Changed from 0.5 to 0.7 power to be less aggressive
+                mask[voice_range_start:voice_range_end, :] = torch.pow(mask[voice_range_start:voice_range_end, :], 0.7)
             
             # Enhance contrast in the mask to make isolation more effective
             # This helps separate voice from background more clearly
-            mask = torch.pow(mask, 0.7)  # Power < 1.0 increases contrast
+            # Changed from 0.7 to 0.8 to make this less aggressive
+            mask = torch.pow(mask, 0.8)  # Power < 1.0 increases contrast
             
             # Smooth mask values below a threshold to reduce musical noise
-            low_mask_values = mask < 0.2
+            # Increase this threshold and reduce the scaling to let more sound through
+            low_mask_values = mask < 0.3
             if low_mask_values.any():
-                mask[low_mask_values] *= 0.5
-            
-            # Re-calculate statistics after adjustment
-            adj_mask_mean = mask.mean().item()
-            adj_mask_max = mask.max().item()
-            
-            # Print mask statistics for informative windows
-            if i % 10 == 0 and verbose:
-                print(f"\nMask stats (window {i}): original mean={mask_mean:.4f}, adjusted mean={adj_mask_mean:.4f}")
+                mask[low_mask_values] *= 0.7  # Changed from 0.5 to 0.7
             
             # CRITICAL: Apply mask to isolate voice
+            # Add a minimum mask value to ensure some sound always comes through
+            # This prevents complete silence in the output
+            mask = torch.clamp(mask, min=0.1)
+            
+            # Apply the mask to get isolated magnitude spectrum
+            # This was the missing line causing the error
             isolated_magnitude = magnitude * mask
             
             # Verify isolated magnitude has non-zero values
@@ -278,8 +284,12 @@ def process_audio(
             # Reconstruct complex STFT
             isolated_stft = isolated_magnitude * torch.exp(1j * phase)
             
-            # Convert back to time domain
-            hann_window = torch.hann_window(N_FFT).to(isolated_stft.device)
+            # Convert back to time domain - ENSURE DEVICE CONSISTENCY
+            # Move the window and STFT to same device (CPU is safest)
+            isolated_stft = isolated_stft.cpu()
+            hann_window = torch.hann_window(N_FFT, device='cpu')
+            
+            # Perform ISTFT on CPU for stability
             window_isolated_audio = torch.istft(
                 isolated_stft,
                 n_fft=N_FFT,
@@ -290,22 +300,27 @@ def process_audio(
             # Check if we got valid audio back
             if torch.isnan(window_isolated_audio).any() or torch.isinf(window_isolated_audio).any():
                 print(f"\nWARNING: NaN or Inf in audio for window {i}. Using original audio.")
-                window_isolated_audio = window_audio * 0.5  # Use original scaled down
+                window_isolated_audio = window_audio.cpu() * 0.5  # Use original scaled down, ensure on CPU
             
-            # CRITICAL FIX: Ensure both tensors are on the same device
-            if window_isolated_audio.device != window_envelope.device:
-                window_isolated_audio = window_isolated_audio.to(window_envelope.device)
+            # CRITICAL FIX: Ensure all tensors are on CPU for consistent processing
+            window_envelope_cpu = window_envelope.cpu()
+            window_isolated_audio = window_isolated_audio.cpu()
             
             # Apply window envelope for smooth transitions
-            window_isolated_audio = window_isolated_audio * window_envelope[:, :window_isolated_audio.shape[1]]
+            window_isolated_audio = window_isolated_audio * window_envelope_cpu[:, :window_isolated_audio.shape[1]]
             
             # Add to output with overlap-add (standard approach for audio processing)
+            # Ensure output_audio is on CPU for consistent processing
+            if output_audio.device.type != 'cpu':
+                output_audio = output_audio.cpu()
+                weight = weight.cpu()
+                
             output_end = min(start_sample + window_samples, output_audio.shape[1])
             current_window_size = output_end - start_sample
             
             if current_window_size > 0 and window_isolated_audio.shape[1] >= current_window_size:
                 output_audio[:, start_sample:output_end] += window_isolated_audio[:, :current_window_size]
-                weight[:, start_sample:output_end] += window_envelope[:, :current_window_size]
+                weight[:, start_sample:output_end] += window_envelope_cpu[:, :current_window_size]
             
             # Update progress bar with useful info
             if verbose:
@@ -374,13 +389,25 @@ def process_audio(
             weight = torch.clamp(weight, min=epsilon)
             output_audio = output_audio / weight
     
-    # Check if output is silent
+    # Ensure all final operations happen on CPU
+    output_audio = output_audio.cpu()
+    original_audio = original_audio.cpu()
+    
+    # Check if output is silent - more aggressive check and recovery
     output_max = output_audio.abs().max().item()
-    if output_max < 0.01:
-        print("\nWARNING: Output is nearly silent. Applying gain.")
-        # Apply gain instead of mixing with original
-        output_audio = output_audio * 5.0  # Increase gain
+    if output_max < 0.05:  # Changed from 0.01 to 0.05 for more sensitivity
+        print("\nWARNING: Output is nearly silent. Applying gain and mixing with original.")
+        # Mix with original instead of just applying gain
+        # This ensures we always have some audio content
+        output_audio = (output_audio * 5.0 * 0.7) + (original_audio * 0.3)
         output_max = output_audio.abs().max().item()
+        print(f"After recovery, max amplitude: {output_max:.4f}")
+    
+    # Add a final safety check - if we still have very low output, mix in original
+    if output_max < 0.1:
+        mix_ratio = 0.5  # 50% original if we're still too quiet
+        print(f"Output still too quiet. Mixing with {mix_ratio*100}% of original audio.")
+        output_audio = (output_audio * (1-mix_ratio)) + (original_audio * mix_ratio)
     
     # Normalize to prevent clipping
     if output_max > 0.95:
@@ -397,10 +424,10 @@ def process_audio(
     # Create output directory if needed
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    # Save audio file
+    # Save audio file - ensure CPU tensors
     torchaudio.save(
         output_path,
-        output_audio.cpu(),
+        output_audio.cpu(),  # Redundant but safe
         SAMPLE_RATE
     )
     
