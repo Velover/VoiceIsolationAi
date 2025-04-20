@@ -107,16 +107,28 @@ def create_test_files(output_dir='TEST', num_files=5, duration=20, min_snr=3.0, 
             # Create segments of the desired duration
             samples_needed = duration * SAMPLE_RATE
             
-            # Loop voice and noise if needed
-            while voice.shape[1] < samples_needed:
-                voice = torch.cat([voice, voice], dim=1)
+            # Select random segments from longer audio files, or loop shorter ones
+            if voice.shape[1] > samples_needed:
+                # If voice file is longer than needed, select a random segment
+                start_idx = random.randint(0, voice.shape[1] - samples_needed)
+                voice = voice[:, start_idx:start_idx + samples_needed]
+            else:
+                # Loop voice if needed (existing behavior)
+                while voice.shape[1] < samples_needed:
+                    voice = torch.cat([voice, voice], dim=1)
+                # Trim to desired length
+                voice = voice[:, :samples_needed]
             
-            while noise.shape[1] < samples_needed:
-                noise = torch.cat([noise, noise], dim=1)
-            
-            # Trim to desired length
-            voice = voice[:, :samples_needed]
-            noise = noise[:, :samples_needed]
+            if noise.shape[1] > samples_needed:
+                # If noise file is longer than needed, select a random segment
+                start_idx = random.randint(0, noise.shape[1] - samples_needed)
+                noise = noise[:, start_idx:start_idx + samples_needed]
+            else:
+                # Loop noise if needed (existing behavior)
+                while noise.shape[1] < samples_needed:
+                    noise = torch.cat([noise, noise], dim=1)
+                # Trim to desired length
+                noise = noise[:, :samples_needed]
             
             # Normalize to prevent clipping
             voice = voice / voice.abs().max()
