@@ -20,7 +20,8 @@ from .config import (
     LEARNING_RATE, N_FFT, VALIDATION_SPLIT, RANDOM_SEED,
     USE_GPU, GPU_DEVICE, MIXED_PRECISION, CUDNN_BENCHMARK, GPU_MEMORY_FRACTION,
     DATALOADER_WORKERS, DATALOADER_PREFETCH, DATALOADER_PIN_MEMORY, AUTO_DETECT_SAMPLES,
-    USE_CACHED_DATA, PRELOAD_SAMPLES, BACKGROUND_WORKERS
+    USE_CACHED_DATA, PRELOAD_SAMPLES, BACKGROUND_WORKERS,
+    EARLY_STOPPING_PATIENCE, EARLY_STOPPING_MIN_DELTA, CHECKPOINT_FREQUENCY
 )
 from .preprocessing import AudioPreprocessor, get_audio_files
 from .model import VoiceIsolationModel, MaskedLoss, VoiceIsolationModelDeep
@@ -165,7 +166,8 @@ def train_model(
     use_deep_model: bool = False,
     use_cache: bool = USE_CACHED_DATA,
     use_preprocessed: bool = False,  # New flag for pre-generated samples
-    preprocessed_dir: Optional[str] = None  # Path to pre-generated samples
+    preprocessed_dir: Optional[str] = None,  # Path to pre-generated samples
+    enable_early_stopping: bool = True  # Add early stopping parameter
 ) -> Tuple[nn.Module, Dict]:
     """
     Train the voice isolation model.
@@ -184,6 +186,7 @@ def train_model(
         use_cache: Use cached preprocessed data
         use_preprocessed: Whether to use pre-generated samples
         preprocessed_dir: Directory with pre-generated samples
+        enable_early_stopping: Enable early stopping during training
         
     Returns:
         Tuple of (trained model, training history)
@@ -398,6 +401,12 @@ def train_model(
         'learning_rates': []
     }
     
+    # Add early stopping variables
+    if enable_early_stopping:
+        best_val_loss = float('inf')
+        patience_counter = 0
+        best_model_state = None
+    
     # Training loop
     print(f"\n=== STARTING TRAINING ({epochs} EPOCHS) ===")
     if use_mixed_precision and device.type == 'cuda':
@@ -418,22 +427,6 @@ def train_model(
     # Store batch timing information
     batch_times = []
     
-    # Create CUDA streams for overlapping operations
-    if device.type == 'cuda':
-        # Main computing stream
-        compute_stream = torch.cuda.Stream()
-        # Data transfer stream
-        transfer_stream = torch.cuda.Stream()
-        # Prefetch the first batch to warm up the pipeline
-        next_batch = None
-        try:
-            # Get first batch in advance
-            for prefetch_batch in train_loader:
-                next_batch = prefetch_batch
-                break
-        except:
-            pass
-    
     for epoch in progress_bar:
         # Training phase
         model.train()
@@ -449,143 +442,79 @@ def train_model(
         
         while batch_idx < batch_count:
             batch_start = time.time()
-            # Use prefetched batch if available, otherwise get next batch
-            if device.type == 'cuda' and next_batch is not None:
-                batch = next_batch
-                # Prefetch next batch in background
-                try:
-                    next_batch = next(train_iter)
-                except StopIteration:
-                    next_batch = None
-            else:
-                try:
-                    batch = next(train_iter)
-                except StopIteration:
-                    break
+            try:
+                batch = next(train_iter)
+            except StopIteration:
+                break
             
             batch_idx += 1
             
-            # Process batch (keep existing CUDA stream logic)
-            if device.type == 'cuda':
-                # Use CUDA streams for parallel operations
-                with torch.cuda.stream(transfer_stream):
-                    # Move data to GPU in the transfer stream
-                    mixed_spec = batch['mixed'].to(device, non_blocking=True)
-                    target_mask = batch['mask'].to(device, non_blocking=True)
-                
-                # Synchronize streams to ensure data is ready
-                torch.cuda.current_stream().wait_stream(transfer_stream)
-                
-                # Process in compute stream
-                with torch.cuda.stream(compute_stream):
-                    # Forward pass with mixed precision
-                    optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
-                    
-                    if use_mixed_precision:
-                        with torch.autocast(device_type=device.type, dtype=torch.float16):
-                            pred_mask = model(mixed_spec)
-                            loss = loss_fn(pred_mask, target_mask)
-                        
-                        # Backward pass with gradient scaling for mixed precision
-                        scaler.scale(loss).backward()
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        # Standard training path
-                        pred_mask = model(mixed_spec)
-                        loss = loss_fn(pred_mask, target_mask)
-                        loss.backward()
-                        optimizer.step()
-            else:
-                # CPU path - simpler without streams
-                mixed_spec = batch['mixed'].to(device)
-                target_mask = batch['mask'].to(device)
-                
-                optimizer.zero_grad(set_to_none=True)
-                pred_mask = model(mixed_spec)
-                loss = loss_fn(pred_mask, target_mask)
-                loss.backward()
-                optimizer.step()
+            # Process batch
+            mixed_spec = batch['mixed'].to(device)
+            target_mask = batch['mask'].to(device)
             
-            # Wait for compute stream to finish
-            if device.type == 'cuda':
-                torch.cuda.current_stream().wait_stream(compute_stream)
+            optimizer.zero_grad(set_to_none=True)
+            pred_mask = model(mixed_spec)
+            loss = loss_fn(pred_mask, target_mask)
+            loss.backward()
+            optimizer.step()
             
             # Update progress
             train_loss += loss.item()
             batch_times.append(time.time() - batch_start)
-            
-            # Calculate average stats for last 50 batches
-            recent_batch_times = batch_times[-50:]
-            avg_batch_time = sum(recent_batch_times) / len(recent_batch_times)
-            global_step = epoch * batch_count + batch_idx
-            progress_percent = 100.0 * global_step / total_steps
-            
-            # Calculate ETA
-            elapsed = time.time() - start_training_time
-            steps_done = global_step
-            steps_remaining = total_steps - steps_done
-            eta_seconds = avg_batch_time * steps_remaining if steps_done > 0 else 0
-            
-            # Calculate memory stats
-            if device.type == 'cuda':
-                mem_allocated = torch.cuda.memory_allocated(GPU_DEVICE) / 1024**3  # GB
-                mem_reserved = torch.cuda.memory_reserved(GPU_DEVICE) / 1024**3  # GB
-                mem_str = f", Mem: {mem_allocated:.1f}/{mem_reserved:.1f} GB"
-            else:
-                mem_str = ""
-            
-            # Create a custom progress indicator to avoid tqdm overhead
-            if batch_idx % 5 == 0 or batch_idx == batch_count:
-                eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
-                print(f"\rTraining: {progress_percent:.1f}% [{batch_idx}/{batch_count}] "
-                      f"Loss: {loss.item():.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}, "
-                      f"Batch: {avg_batch_time*1000:.1f}ms, ETA: {eta_str}{mem_str}", end="")
         
-        print()  # New line after progress tracking
-        
-        # Validation phase with mixed precision
+        # Validation phase
         model.eval()
         val_loss = 0.0
         
         with torch.no_grad():
-            val_progress = tqdm(
-                val_loader, 
-                desc=f"Validating (Epoch {epoch+1}/{epochs})", 
-                leave=False,
-                unit="batch",
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
-            )
-            
-            for batch in val_progress:
+            for batch in val_loader:
                 mixed_spec = batch['mixed'].to(device, non_blocking=True)
                 target_mask = batch['mask'].to(device, non_blocking=True)
                 
-                # Correct autocast usage for PyTorch 2.6.0
-                with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision and device.type == 'cuda', dtype=torch.float16):
-                    pred_mask = model(mixed_spec)
-                    loss = loss_fn(pred_mask, target_mask)
+                pred_mask = model(mixed_spec)
+                loss = loss_fn(pred_mask, target_mask)
                 
                 val_loss += loss.item()
-                
-                # Update progress bar
-                val_progress.set_postfix(loss=f"{loss.item():.4f}")
         
         # Average losses
         avg_train_loss = train_loss / len(train_loader)
         avg_val_loss = val_loss / len(val_loader)
         
-        # Calculate epoch stats
-        epoch_time = time.time() - epoch_start_time
-        epoch_percent = 100.0 * (epoch + 1) / epochs
-        total_elapsed = time.time() - start_training_time
-        eta_seconds = (total_elapsed / (epoch + 1)) * (epochs - epoch - 1)
-        eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
+        # Save checkpoint at regular intervals
+        if (epoch + 1) % CHECKPOINT_FREQUENCY == 0:
+            checkpoint_path = os.path.join(
+                OUTPUT_DIR, 
+                f"checkpoint_{window_size}_{epoch+1}.pth"
+            )
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_loss': avg_train_loss,
+                'val_loss': avg_val_loss,
+                'window_size': window_size,
+                'n_fft': N_FFT,
+                'deep_model': use_deep_model,
+            }, checkpoint_path)
+            print(f"Saved checkpoint to {checkpoint_path}")
         
-        # Print epoch summary
-        print(f"Epoch {epoch+1}/{epochs} ({epoch_percent:.1f}%) - "
-              f"Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, "
-              f"Time: {epoch_time:.1f}s, ETA: {eta_str}")
+        # Early stopping logic
+        if enable_early_stopping:
+            if avg_val_loss < best_val_loss - EARLY_STOPPING_MIN_DELTA:
+                best_val_loss = avg_val_loss
+                patience_counter = 0
+                best_model_state = model.state_dict().copy()
+                print(f"New best validation loss: {best_val_loss:.4f}")
+            else:
+                patience_counter += 1
+                print(f"Early stopping patience: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
+                
+                if patience_counter >= EARLY_STOPPING_PATIENCE:
+                    print(f"Early stopping triggered after {epoch+1} epochs")
+                    # Restore best model
+                    model.load_state_dict(best_model_state)
+                    break
         
         # Update history
         history['train_loss'].append(avg_train_loss)
@@ -597,19 +526,6 @@ def train_model(
         # Save current learning rate to history
         current_lr = optimizer.param_groups[0]['lr']
         history['learning_rates'].append(current_lr)
-    
-    # Stop GPU monitoring if started
-    if use_gpu and 'gpu_monitor' in locals() and gpu_monitor is not None:
-        gpu_monitor.stop()
-        gpu_monitor.print_summary()
-    
-    # Show GPU utilization after training
-    if device.type == 'cuda':
-        allocated = torch.cuda.memory_allocated(GPU_DEVICE) / 1024**2
-        reserved = torch.cuda.memory_reserved(GPU_DEVICE) / 1024**2
-        print(f"\n=== GPU MEMORY USAGE ===")
-        print(f"Allocated: {allocated:.1f} MB")
-        print(f"Reserved: {reserved:.1f} MB")
     
     # Save model if path provided
     if model_save_path:

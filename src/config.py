@@ -26,7 +26,7 @@ AUTO_DETECT_SAMPLES = True  # Auto-detect optimal sample count based on hardware
 
 # Performance tuning
 BATCH_SIZE = 64  # Batch size for GPU efficiency
-DATALOADER_WORKERS = 2  # Number of workers for data loading
+DATALOADER_WORKERS = 4  # Increased from 2 for faster data loading
 DATALOADER_PREFETCH = 4  # Increased prefetch factor for better GPU feeding
 DATALOADER_PIN_MEMORY = True  # Pin memory for faster CPU->GPU transfers
 
@@ -49,15 +49,22 @@ DEFAULT_WINDOW_SIZE = 'medium'  # Default window size choice
 N_FFT = 2048  # Increased from 512 for better frequency resolution
 HOP_LENGTH = 512  # Increased from 128 for better processing efficiency
 N_MELS = 128  # Increased from 64 for more detailed spectral features
-LEARNING_RATE = 0.005
-EPOCHS = 50
+LEARNING_RATE = 0.001  # Reduced from 0.005 for more stable long-term training
+EPOCHS = 150  # Increased default for deeper learning
 
 # Fixed spectrogram time dimension for consistent batch processing
 SPEC_TIME_DIM = 256  # Fixed time dimension for spectrograms
 
-# Training configurations
-VALIDATION_SPLIT = 0.2
+# Training configurations - MODIFIED FOR LONGER TRAINING
+VALIDATION_SPLIT = 0.25  # Increased from 0.2 for better generalization
 RANDOM_SEED = 42
+
+# Add early stopping configuration
+EARLY_STOPPING_PATIENCE = 15  # Stop if no improvement for 15 epochs
+EARLY_STOPPING_MIN_DELTA = 0.001  # Minimum improvement to be considered significant
+
+# Checkpoint frequency (save every N epochs)
+CHECKPOINT_FREQUENCY = 50
 
 # Supported audio formats
 SUPPORTED_FORMATS = ['.mp3', '.wav', '.flac']  # Added FLAC support
