@@ -49,7 +49,7 @@ DEFAULT_WINDOW_SIZE = 'medium'  # Default window size choice
 N_FFT = 2048  # Increased from 512 for better frequency resolution
 HOP_LENGTH = 512  # Increased from 128 for better processing efficiency
 N_MELS = 128  # Increased from 64 for more detailed spectral features
-LEARNING_RATE = 0.005
+LEARNING_RATE = 0.001
 EPOCHS = 50
 
 # Fixed spectrogram time dimension for consistent batch processing

@@ -10,7 +10,7 @@ from tabulate import tabulate
 import time
 import datetime
 
-from config import OUTPUT_DIR
+from .config import OUTPUT_DIR
 
 def load_model_info(model_path: str) -> Dict:
     """
