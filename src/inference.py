@@ -111,8 +111,16 @@ def process_audio(
     window_ms = WINDOW_SIZES.get(window_size, 500)
     window_samples = int(SAMPLE_RATE * window_ms / 1000)
     
-    # Calculate hop size for overlapping windows (50% overlap is ideal for isolation)
-    hop_samples = window_samples // 2
+    # Calculate hop size for overlapping windows
+    # Adaptive hop size based on window size - larger windows need less overlap
+    if window_ms <= 100:  # Small windows (30-100ms)
+        hop_ratio = 0.5  # 50% overlap for small windows
+    elif window_ms <= 1000:  # Medium windows (100ms-1s)
+        hop_ratio = 0.6  # 40% overlap for medium windows
+    else:  # Large windows (1s+)
+        hop_ratio = 0.75  # 25% overlap for large windows
+        
+    hop_samples = int(window_samples * hop_ratio)
     
     # Number of windows needed to cover the entire audio
     num_windows = math.ceil((audio.shape[1] - window_samples) / hop_samples) + 1
@@ -120,8 +128,15 @@ def process_audio(
     if verbose:
         print(f"[3/6] Processing with sliding window approach...")
         print(f"       Audio length: {audio_duration_seconds:.2f}s, Window size: {window_ms}ms")
-        print(f"       Processing {num_windows} windows with 50% overlap")
+        print(f"       Processing {num_windows} windows with {int((1-hop_ratio)*100)}% overlap")
         print(f"       Window samples: {window_samples}, Hop samples: {hop_samples}")
+    
+    # Using a tapered window for smoother transitions between segments
+    # This reduces audible artifacts at window boundaries
+    window_envelope = torch.hann_window(window_samples, dtype=audio.dtype, device=audio.device)
+    # Add a small offset to ensure every sample gets some weight
+    window_envelope = window_envelope * 0.95 + 0.05
+    window_envelope = window_envelope.unsqueeze(0)  # Add channel dimension
     
     # Create a tensor to accumulate the output audio and weights
     output_audio = torch.zeros_like(audio)
@@ -131,10 +146,6 @@ def process_audio(
     mask_means = []
     mask_maxes = []
     mask_mins = []
-    
-    # Using a standard Hann window for correct overlap-add
-    window_envelope = torch.hann_window(window_samples, dtype=audio.dtype, device=audio.device)
-    window_envelope = window_envelope.unsqueeze(0)  # Add channel dimension
     
     # Save a copy of the original audio for fallback and comparison
     original_audio = audio.clone()
@@ -226,9 +237,26 @@ def process_audio(
                 # Subtract a baseline and rescale to make mask more discriminative
                 mask = torch.clamp((mask - 0.5) * 2, 0.0, 1.0)
             
+            # Apply frequency-dependent enhancement
+            # Voice is typically in mid-range frequencies (100Hz-3000Hz)
+            # We'll boost this range for better voice isolation
+            freq_bins = mask.shape[0]
+            voice_range_start = int(freq_bins * 0.05)  # ~100Hz
+            voice_range_end = int(freq_bins * 0.3)     # ~3000Hz
+            
+            # Boost the voice frequency range slightly
+            voice_freq_mask = mask[voice_range_start:voice_range_end, :]
+            if voice_freq_mask.mean() > 0.4:  # Only if we detect probable voice
+                mask[voice_range_start:voice_range_end, :] = torch.pow(mask[voice_range_start:voice_range_end, :], 0.5)
+            
             # Enhance contrast in the mask to make isolation more effective
             # This helps separate voice from background more clearly
             mask = torch.pow(mask, 0.7)  # Power < 1.0 increases contrast
+            
+            # Smooth mask values below a threshold to reduce musical noise
+            low_mask_values = mask < 0.2
+            if low_mask_values.any():
+                mask[low_mask_values] *= 0.5
             
             # Re-calculate statistics after adjustment
             adj_mask_mean = mask.mean().item()
@@ -309,6 +337,42 @@ def process_audio(
         epsilon = 1e-10
         weight = torch.clamp(weight, min=epsilon)  # Avoid division by zero
         output_audio = output_audio / weight
+    
+        # Final smoothing pass to eliminate any remaining discontinuities
+        if window_samples > 100:  # Only for non-tiny windows
+            # Add a small epsilon to weight to avoid division by zero
+            epsilon = 1e-10
+            weight = torch.clamp(weight, min=epsilon)
+            output_audio = output_audio / weight
+            
+            # Apply a light smoothing filter to eliminate any sharp transitions
+            # This helps reduce "musical" artifacts from windowing
+            smoothing_kernel_size = min(int(SAMPLE_RATE * 0.01), 512)  # ~10ms or less
+            if smoothing_kernel_size % 2 == 0:  # Ensure odd kernel size
+                smoothing_kernel_size += 1
+                
+            try:
+                # Only apply if we have enough samples and torchaudio supports conv filtering
+                if output_audio.shape[1] > smoothing_kernel_size * 3:
+                    import torch.nn.functional as F
+                    smoothing_kernel = torch.hann_window(smoothing_kernel_size, dtype=torch.float32, device='cpu')
+                    smoothing_kernel = smoothing_kernel / smoothing_kernel.sum()
+                    smoothing_kernel = smoothing_kernel.view(1, 1, smoothing_kernel_size)
+                    
+                    # Apply convolution for smoothing
+                    # Move to CPU for this operation to ensure compatibility
+                    output_cpu = output_audio.cpu()
+                    padded = F.pad(output_cpu, (smoothing_kernel_size//2, smoothing_kernel_size//2), mode='reflect')
+                    output_audio = F.conv1d(padded, smoothing_kernel)
+            except Exception as e:
+                # If smoothing fails, continue without it
+                if verbose:
+                    print(f"       Note: Final smoothing pass skipped: {e}")
+        else:
+            # Standard normalization for small windows
+            epsilon = 1e-10
+            weight = torch.clamp(weight, min=epsilon)
+            output_audio = output_audio / weight
     
     # Check if output is silent
     output_max = output_audio.abs().max().item()

@@ -70,6 +70,8 @@ For maximum training speed, preprocess audio data:
    python main.py generate-samples --samples 2000 --workers 4
    ```
 
+   > **New Feature**: The system now selects random segments from longer audio files during training, providing more diverse training data and better model performance.
+
 ### Training the Model
 
 ```bash
@@ -115,6 +117,7 @@ These commands will:
 1. Create a TEST directory with subdirectories VOICE, NOISE, and MIXED
 2. Generate mixed audio files with controlled SNR levels
 3. Save the clean voice files for comparison
+4. Select random segments from longer files for more realistic tests
 
 You can then use these files to test your model:
 
@@ -177,9 +180,15 @@ This will display all trained models with their names and metadata.
 ### Troubleshooting
 
 - **"No voice/noise files found"**: Make sure you have audio files in the VOICE and NOISE directories
+
   - You can create test examples with `python main.py preprocess --create-examples`
   - The VOICE directory should contain recordings of the target person
   - The NOISE directory should contain background noises and other people's voices
+
+- **Poor voice isolation quality**: Try these approaches:
+  - Ensure your VOICE directory contains clear samples of only the target voice
+  - Use the `--debug` flag when processing to analyze mask behavior
+  - Try a different window size (small windows work better for quick speech, large for steady speech)
 
 ## Training Performance Tips
 
@@ -197,6 +206,8 @@ This will display all trained models with their names and metadata.
    - For low-memory systems, reduce worker count and generate fewer samples
 
 3. **For best isolation quality**:
-   - The default configuration now uses enhanced FFT parameters (N_FFT=2048, HOP_LENGTH=512)
+   - The default configuration uses enhanced FFT parameters (N_FFT=2048, HOP_LENGTH=512)
    - These provide better frequency resolution and voice separation
+   - The new adaptive window processing adjusts overlap based on window size for optimal results
+   - Frequency-enhanced mask application improves voice isolation in the typical voice frequency range
    - If isolation quality is poor, try the `--debug` flag to generate diagnostic files

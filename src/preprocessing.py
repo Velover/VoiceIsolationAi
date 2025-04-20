@@ -196,10 +196,28 @@ class AudioPreprocessor:
         if noise_path:
             noise = self.load_audio(noise_path)
             
-            # Adjust lengths to match
-            min_length = min(voice.shape[1], noise.shape[1])
-            voice = voice[:, :min_length]
-            noise = noise[:, :min_length]
+            # Calculate minimum window for training
+            min_window_samples = int(SAMPLE_RATE * 0.5)  # Use at least 0.5 seconds
+            
+            # If both files are long enough, select random segments
+            if voice.shape[1] > min_window_samples and noise.shape[1] > min_window_samples:
+                # Determine maximum length we can use
+                max_length = min(voice.shape[1], noise.shape[1])
+                # Determine the segment length (use at least 0.5 seconds, or the maximum available)
+                segment_length = min(max_length, max(min_window_samples, int(max_length * 0.7)))
+                
+                # Select random start points for both voice and noise
+                voice_start = random.randint(0, voice.shape[1] - segment_length)
+                noise_start = random.randint(0, noise.shape[1] - segment_length)
+                
+                # Extract segments
+                voice = voice[:, voice_start:voice_start + segment_length]
+                noise = noise[:, noise_start:noise_start + segment_length]
+            else:
+                # Just use the standard approach for shorter files
+                min_length = min(voice.shape[1], noise.shape[1])
+                voice = voice[:, :min_length]
+                noise = noise[:, :min_length]
             
             # Mix voice and noise - ensure on same device
             if voice.device != noise.device:
@@ -344,10 +362,28 @@ class AudioPreprocessor:
         """
         # Mix audio
         if noise is not None:
-            # Adjust lengths to match
-            min_length = min(voice.shape[1], noise.shape[1])
-            voice = voice[:, :min_length]
-            noise = noise[:, :min_length]
+            # Calculate minimum window for training
+            min_window_samples = int(SAMPLE_RATE * 0.5)  # Use at least 0.5 seconds
+            
+            # If both files are long enough, select random segments
+            if voice.shape[1] > min_window_samples and noise.shape[1] > min_window_samples:
+                # Determine maximum length we can use
+                max_length = min(voice.shape[1], noise.shape[1])
+                # Determine the segment length
+                segment_length = min(max_length, max(min_window_samples, int(max_length * 0.7)))
+                
+                # Select random start points for both voice and noise
+                voice_start = random.randint(0, voice.shape[1] - segment_length)
+                noise_start = random.randint(0, noise.shape[1] - segment_length)
+                
+                # Extract segments
+                voice = voice[:, voice_start:voice_start + segment_length]
+                noise = noise[:, noise_start:noise_start + segment_length]
+            else:
+                # Just use the standard approach for shorter files
+                min_length = min(voice.shape[1], noise.shape[1])
+                voice = voice[:, :min_length]
+                noise = noise[:, :min_length]
             
             # Mix voice and noise - ensure same device
             if voice.device != noise.device:
